@@ -15,7 +15,7 @@ prepare_annotation_data <- function(
   sample_ID=NULL,
   cluster_resolutions=c(0.2, 0.35, 0.5, 0.8, 1, 1.2),
   save_directory=NULL,
-  qc_plot_directory=NULL,
+  qc_plot_directory=NULL
 ){
   if(is.null(sample_ID)){
     sample_ID = gsub(".dna[+]protein.h5", "", sort(basename(input_file)))
@@ -75,7 +75,7 @@ prepare_annotation_data <- function(
   elb_plot <- ElbowPlot(obj, ndims=30)$data
   pct <- elb_plot$stdev
   max_pca_dim <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
-  if(!is.na(qc_plot_directory)){
+  if(!is.null(qc_plot_directory)){
     elb_plot <- ggplot() + 
       geom_point(data = elb_plot %>% filter(dims <= max_pca_dim), mapping = aes(dims, stdev), size = 5, color = 'green') +
       geom_point(data = elb_plot %>% filter(dims > max_pca_dim), mapping = aes(dims, stdev), size = 5, color = 'red') +
@@ -88,8 +88,8 @@ prepare_annotation_data <- function(
   # UMAP #
   ########
   
-  obj <- RunUMAP(obj, reduction = "pca", dims = 1:max_pca_dim, min.dist = 0)
-  obj <- FindNeighbors(obj, reduction = "pca", dims = 1:max_pca_dim,k.param=max_pca_dim)
+  obj <- RunUMAP(obj, reduction = "pca", dims = 1:max_pca_dim, min.dist = 0.3)
+  obj <- FindNeighbors(obj, reduction = "pca", dims = 1:max_pca_dim,k.param=20)
   
   for (res in cluster_resolutions) {
     obj <- FindClusters(obj, resolution = res,random.seed=888)
@@ -102,4 +102,6 @@ prepare_annotation_data <- function(
   if(!is.null(save_directory)){
     saveRDS(obj,file.path(save_directory,sample_ID,"_seurat_obj.rds"))
   }
+  
+  return(obj)
 }
