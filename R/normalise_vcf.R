@@ -1,6 +1,6 @@
 #' normalise_vcf.R
 #'
-#' This function loads annotation data from a tapestri .h5 file and generates a seurat object ready for annotation
+#' This function loads variant information from a .h5 file and generates a vcf-like file with per-cell variant information
 #'
 #' @param h5_in Path to input .h5 file
 #' @param out_file Path to output file
