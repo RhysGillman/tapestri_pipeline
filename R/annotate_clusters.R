@@ -9,7 +9,8 @@
 #' @export
 
 
-annotate_clusters <- function(seurat_obj=NULL, resolution=NULL, annotations=NULL){
+annotate_clusters <- function(seurat_obj=NULL, resolution=NULL, annotations=NULL, plot_directory=NULL){
+  sample_ID=seurat_obj@meta.data$sample_ID[1]
   cluster_col <- paste0("ADT_snn_res.", resolution)
   if (!cluster_col %in% colnames(seurat_obj@meta.data)) {
     stop("Couldn't find cluster column: ", cluster_col)
@@ -23,5 +24,22 @@ annotate_clusters <- function(seurat_obj=NULL, resolution=NULL, annotations=NULL
   
   seurat_obj$final_annotation <- lab
   Idents(seurat_obj) <- "final_annotation"
+  
+  if(!is.null(plot_directory)){
+    DimPlot(seurat_obj,
+            reduction = "umap",
+            group.by  = "final_annotation",
+            label     = TRUE,
+            repel     = TRUE, label.box = T, pt.size=2) +
+      ggtitle("Final Annotations")
+    
+    ggsave(file.path(plot_directory,paste0(sample_ID,"_final_annotations.png")))
+  }
+  
+  
+  
   return(seurat_obj)
+  
+  
+  
 }
