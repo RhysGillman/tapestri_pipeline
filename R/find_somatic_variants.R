@@ -16,6 +16,8 @@ find_somatic_variants <- function(h5_in=NULL,
                                   cell_annotations,
                                   out_dir,
                                   file_prefix,
+                                  run_vep = T,
+                                  priority_only=T,
                                   block = 1000,
                                   # Variant-level thresholds
                                   min_varcount_total        = 1,
@@ -24,6 +26,7 @@ find_somatic_variants <- function(h5_in=NULL,
                                   min_dataportion_total     = 0,
                                   min_quality_mean_total    = 0,
                                   min_allelefreq_mean_total = 0,
+                                  rare_cutoff = 0.02,
                                   # celltype-specific thresholds
                                   min_varcount_celltype     = 1,
                                   min_varportion_celltype   = 0,
@@ -39,7 +42,9 @@ find_somatic_variants <- function(h5_in=NULL,
                                   overwrite=TRUE,
                                   genome_version="hg19"
                           ) {
-  # check paths
+  ###############
+  # Check Paths #
+  ###############
   
   all_data_file <- file.path(out_dir,paste0(file_prefix,"_all.tsv"))
   summary_file <- file.path(out_dir,paste0(file_prefix,"_all_summary.tsv"))
@@ -85,7 +90,10 @@ find_somatic_variants <- function(h5_in=NULL,
     }
   }
   
-  # barcodes
+  #####################
+  # Get Cell Barcodes #
+  #####################
+  
   if(!is.null(vcf_in)){
     hdr <- scanVcfHeader(vcf_in)
     # genome version
@@ -102,6 +110,7 @@ find_somatic_variants <- function(h5_in=NULL,
     
   if (length(barcodes) != length(cell_annotations)) stop("cell annotations are not the same length as vcf samples")
   
+  # attempt to trim barcodes if needed
   if (!identical(sort(names(cell_annotations)),sort(barcodes))) {
     message("variant barcodes don't match cell annotations")
     message("attemtping to find match in substring...")
@@ -136,8 +145,10 @@ find_somatic_variants <- function(h5_in=NULL,
   }
     
   
+  ##############################################################
+  # ------------------- Normalise Variants ------------------- #
+  ##############################################################
   
-  # -------------------process variants ----------------------
   message("Processing per-variant info...")
   
   normalise_vcf <- function(vcf_df){
@@ -149,73 +160,82 @@ find_somatic_variants <- function(h5_in=NULL,
         # detect INS/DEL/SNV based on ref/alt lengths
         simple_ins = (ref_len == 1) & (alt_len > 1) & (substr(REF,1,1)==substr(ALT,1,1)),
         complex_ins = (ref_len > 1) & (alt_len > ref_len) & (substr(REF,1,1)==substr(ALT,1,1)),
-        ins_len0 = (ref_len == 0) & (alt_len > ref_len),
-        simple_del = (alt_len == 0) & (ref_len > alt_len),
+        #ins_len0 = (ref_len == 0) & (alt_len > ref_len),
+        simple_del = ((alt_len == 0) & (ref_len > alt_len)) | (ALT=="-" & (ref_len > alt_len)),
         complex_del = (alt_len > 0) & (ref_len > alt_len) & (substr(REF,1,1)==substr(ALT,1,1)),
         simple_snv = (ref_len == 1) & (alt_len == 1) & (REF != ALT),
         complex_snv = (ref_len == alt_len) & (ref_len > 1) & (REF != ALT)) %>%
       rowwise() %>%
       mutate(
-        complex_snv_pos = ifelse(complex_snv, which(str_split(ALT, pattern = "")[[1]] != str_split(REF, pattern = "")[[1]]), NA)
+        complex_snv_pos = ifelse(complex_snv, as.numeric(paste(which(str_split(ALT, pattern = "")[[1]] != str_split(REF, pattern = "")[[1]]), collapse = ",")), NA)
       ) %>%
       ungroup() %>%
+      mutate(mnv = complex_snv & is.na(complex_snv_pos),
+             complex_snv = complex_snv & !is.na(complex_snv_pos)
+             ) %>%
       mutate(
         # skip ambiguous calls
-        skip = str_detect(ALT, stringr::fixed("*")) | str_detect(REF, stringr::fixed("*")) | (!simple_ins&!complex_ins&!ins_len0&!complex_del&!simple_snv&!complex_snv),
+        skip = str_detect(ALT, stringr::fixed("*")) | str_detect(REF, stringr::fixed("*")) | (!simple_ins&!complex_ins&!complex_del&!simple_snv&!complex_snv&!mnv),
         # handling positions
         START = case_when(
-          simple_ins ~ POS,
-          complex_ins ~ POS,
-          ins_len0 ~ POS,
+          simple_ins ~ POS + 1,
+          complex_ins ~ POS + 1,
+          #ins_len0 ~ POS,
           simple_del ~ POS,
-          complex_del ~ POS, # ATGAG ATG
+          complex_del ~ POS + 1,
           simple_snv ~ POS,
-          complex_snv ~ POS + complex_snv_pos - 1
+          complex_snv ~ POS + complex_snv_pos - 1,
+          mnv ~ POS
         ),
         END = case_when(
-          simple_ins ~ START+1,
-          complex_ins ~ START+1,
-          ins_len0 ~ START+1,
-          simple_del ~ START + ref_len - 1,
-          complex_del ~ START + ref_len - alt_len,
+          simple_ins ~ POS,
+          complex_ins ~ POS,
+          #ins_len0 ~ POS-1,
+          simple_del ~ POS + ref_len - 1,
+          complex_del ~ POS + ref_len - alt_len,
           simple_snv ~ POS,
-          complex_snv ~ POS + complex_snv_pos - 1
+          complex_snv ~ POS + complex_snv_pos - 1,
+          mnv ~ POS + ref_len - 1
         ),
         var_type = case_when(
           simple_ins ~ "INS", 
           complex_ins ~ "INS", 
-          ins_len0 ~ "INS", 
+          #ins_len0 ~ "INS", 
           simple_del ~ "DEL", 
           complex_del ~ "DEL", 
           simple_snv ~ "SNV", 
           complex_snv ~ "SNV",
+          mnv ~ "MNV",
           TRUE ~ NA_character_),
         new_REF = case_when(
-          simple_ins ~ REF, 
-          complex_ins ~ substr(REF,1,1), 
-          ins_len0 ~ REF, 
+          simple_ins ~ "-", 
+          complex_ins ~ "-", 
+          #ins_len0 ~ "-", 
           simple_del ~ REF, 
-          complex_del ~ substr(REF,1,1+ref_len-alt_len), # ATGAG ATG
+          complex_del ~ substr(REF,2,1+ref_len-alt_len),
           simple_snv ~ REF, 
-          complex_snv ~ substr(REF,complex_snv_pos,complex_snv_pos)
+          complex_snv ~ substr(REF,complex_snv_pos,complex_snv_pos),
+          mnv ~ REF
         ),
         new_ALT = case_when(
-          simple_ins ~ ALT, 
-          complex_ins ~ substr(ALT,1,1+alt_len-ref_len), 
-          ins_len0 ~ ALT, 
-          simple_del ~ ALT, 
-          complex_del ~ substr(ALT,1,1), # ATGAG ATG
+          simple_ins ~ substr(ALT,2,alt_len), 
+          complex_ins ~ substr(ALT,2,alt_len-ref_len+1), 
+          #ins_len0 ~ ALT, 
+          simple_del ~ "-", 
+          complex_del ~ "-", # ATGAG ATG
           simple_snv ~ ALT, 
-          complex_snv ~ substr(ALT,complex_snv_pos,complex_snv_pos)
+          complex_snv ~ substr(ALT,complex_snv_pos,complex_snv_pos),
+          mnv ~ ALT
         ),
         var_key = case_when(
-          simple_ins ~ paste0(CHROM,":",START+1,"+",substr(new_ALT,2,nchar(new_ALT))), 
-          complex_ins ~ paste0(CHROM,":",START+1,"+",substr(new_ALT,2,nchar(new_ALT))), 
-          ins_len0 ~ paste0(CHROM,":",START,"+",new_ALT), 
+          simple_ins ~ paste0(CHROM,":",START,"+",new_ALT),
+          complex_ins ~ paste0(CHROM,":",START,"+",new_ALT), 
+          #ins_len0 ~ paste0(CHROM,":",START,"+",new_ALT), 
           simple_del ~ paste0(CHROM,":",START,"-",END,"-",new_REF), 
-          complex_del ~ paste0(CHROM,":",START+1,"-",END,"-",substr(new_REF,2,nchar(new_REF))), 
+          complex_del ~ paste0(CHROM,":",START,"-",END,"-",new_REF), 
           simple_snv ~ paste0(CHROM,":",START,new_REF,">",new_ALT), 
-          complex_snv ~ paste0(CHROM,":",START,new_REF,">",new_ALT)
+          complex_snv ~ paste0(CHROM,":",START,new_REF,">",new_ALT),
+          mnv ~ paste0(CHROM,":",START,new_REF,">",new_ALT)
         )
       ) %>%
       mutate(filter=skip | is.na(var_type)) %>%
@@ -244,6 +264,10 @@ find_somatic_variants <- function(h5_in=NULL,
       info = NA,     
       geno = NA
     )
+    
+    if(isOpen(tabix)){
+      close(tabix)
+    }
     
     open(tabix)
     suppressWarnings(rm(variant_info))
@@ -281,17 +305,178 @@ find_somatic_variants <- function(h5_in=NULL,
     variants <- normalise_vcf(variant_info)
   }
   
+  
+  #######################################################################
+  # ------------------- Filter Pass 1  (Formatting) ------------------- #
+  #######################################################################
+  
   # store which variants are being kept
   keep_idx <- !variants$filter
+  keep_map <- which(keep_idx)
   
   if(any(!keep_idx)){
-    message(paste0("WARNING: ", length(which(!keep_idx)),"/",nrow(variants), " variants are being filtered out"))
+    message(paste0("WARNING: ", length(which(!keep_idx)),"/",nrow(variants), " variants are being filtered out due to spurious formatting"))
   }
   
   # filter out unwanted variants
   variants <- variants %>%
     filter(!filter) %>%
     dplyr::select(-filter)
+  
+  ########################################################################
+  # ------------------- Ensemble VEP + Filter Pass 2 ------------------- #
+  ########################################################################
+  
+  # helper to parse numeric from strings like "0.01", "0.01,0.02", "0.01&0.02"
+  #.parse_num_first <- function(x) {
+  #  x <- as.character(x)
+  #  x[!nzchar(x)] <- NA_character_
+  #  x <- sub("[,&].*$", "", x)       # take first if comma/ampersand separated
+  #  suppressWarnings(as.numeric(x))
+  #}
+  
+  # Collapse VEP CSQ rows to per-variant and return indices of priority variants
+  #vep_priority_indices <- function(vep_df, variants, rare_cutoff = 0.02) {
+  #  stopifnot(all(c("ID","Consequence") %in% names(vep_df)))
+  #  stopifnot("variant" %in% names(variants))
+    
+  #  n <- nrow(vep_df)
+    
+    #  flags per CSQ row
+  #  any_lof <- grepl("\\b(frameshift_variant|stop_gained)\\b", vep_df$Consequence)
+    
+  #  aa_cols <- intersect(c("HGVSp","Amino_acids"), names(vep_df))
+  #  has_aa <- if (length(aa_cols)) {
+  #    rowSums(sapply(vep_df[aa_cols], function(x) nzchar(as.character(x)))) > 0
+  #  } else rep(FALSE, n)
+    
+    #gnomAD AF: pick any columns that look like gnomAD*_*_AF or gnomAD*_AF, get rowwise max AF
+  #  gnomad_cols <- grep("^(gnomAD|gnomADe|gnomADg|gnomad|gnomade|gnomadg).+_AF$",
+  #                      names(vep_df), ignore.case = TRUE, value = TRUE)
+  #  gnomad_vec <- rep(NA_real_, n)
+  #  if (length(gnomad_cols)) {
+  #    gmat <- sapply(vep_df[gnomad_cols], .parse_num_first)
+  #    if (is.null(dim(gmat))) gmat <- matrix(gmat, ncol = 1)
+  #    gnomad_vec <- apply(gmat, 1, function(r) {
+  #      mx <- suppressWarnings(max(r, na.rm = TRUE))
+  #      if (is.finite(mx)) mx else NA_real_
+  #    })
+  #  }
+    
+    # “1000G” style AF: prefer GMAF if present, else AF if present
+  #  af_col <- if ("GMAF" %in% names(vep_df)) "GMAF" else if ("AF" %in% names(vep_df)) "AF" else NULL
+  #  gmaf_vec <- if (!is.null(af_col)) .parse_num_first(vep_df[[af_col]]) else rep(NA_real_, n)
+    
+    # reduce to per-variant key
+  #  csq_min <- data.frame(
+  #    ID = vep_df$ID,
+  #    any_lof  = any_lof,
+  #    has_aa   = has_aa,
+  #    gnomad   = gnomad_vec,
+  #    gmaf     = gmaf_vec,
+  #    stringsAsFactors = FALSE
+  #  )
+    
+  #  by_var <- csq_min |>
+  #    dplyr::group_by(ID) |>
+  #    dplyr::summarise(
+  #      any_lof    = any(any_lof, na.rm = TRUE),
+  #      any_aa     = any(has_aa,  na.rm = TRUE),
+  #      max_gnomad = suppressWarnings(max(gnomad, na.rm = TRUE)),
+  #      max_gmaf   = suppressWarnings(max(gmaf,   na.rm = TRUE)),
+  #      .groups = "drop"
+  #    ) |>
+  #    dplyr::mutate(
+  #      max_gnomad = ifelse(is.finite(max_gnomad), max_gnomad, NA_real_),
+  #      max_gmaf   = ifelse(is.finite(max_gmaf),   max_gmaf,   NA_real_),
+        # Perl logic replicated:
+        # start priority = 1 if protein-altering (AA) OR LoF; then drop if common in AF sources
+  #      priority = {
+  #        pr <- as.integer(any_aa | any_lof)
+  #        pr[!is.na(max_gmaf)   & max_gmaf   > rare_cutoff] <- 0
+  #        pr[!is.na(max_gnomad) & max_gnomad > rare_cutoff] <- 0
+  #        pr
+  #      }
+  #    )
+    
+  #  which(variants$variant %in% by_var$ID[by_var$priority == 1])
+  #}
+  
+  
+  
+  
+  if(run_vep){
+    vep_in <- variants %>%
+      mutate(allele=paste0(reference_allele,"/",alternate_allele),
+             strand="+") %>%
+      dplyr::select(chromosome, start_position, end_position, allele, strand, variant)
+    write_tsv(vep_in, file.path(out_dir,paste0(file_prefix,"_vep_in.tsv")), col_names = F)
+    
+    
+    message("Annotating variants using ENSEMBL-vep...")
+    
+    vep_run <- run_vep(
+      file.path(out_dir, paste0(file_prefix, "_vep_in.tsv")),
+      output = file.path(out_dir, paste0(file_prefix, "_vep_annotated.vcf")),
+      return = "data.frame",
+      args = c(
+        "--force_overwrite",
+        "--biotype","--domains",
+        "--max_af","--check_existing","--numbers","--regulatory",
+        "--sift","b","--polyphen","b", "--hgvs", "--flag_pick_allele_gene"
+      )
+    )
+    #vep_run <- .parse_vep_vcf(file.path(out_dir, paste0(file_prefix, "_vep_annotated.vcf")))
+    
+    #vep_run_exon <- run_vep(
+    #  file.path(out_dir, paste0(file_prefix, "_vep_in.tsv")),
+    #  output = file.path(out_dir, paste0(file_prefix, "_vep_annotated_coding_only.vcf")),
+    #  return = "data.frame",
+    #  args = c("--force_overwrite", "--coding_only", "--sift","b","--polyphen","b")
+    #)
+    collapse_terms <- function(x) paste(x, collapse = ";")
+    
+    if(priority_only){
+      message("Finding priroity variants...")
+    }else{
+      message("Retrieving VEP annotation information...")
+    }
+    
+    vep_info_cols <- vep_run %>% filter(PICK==1) %>%
+      dplyr::select(ID, SYMBOL, Gene, Feature, HGVSp, MAX_AF, Consequence, Existing_variation, BIOTYPE, SIFT, PolyPhen) %>%
+      # generate a user-friendly plot label
+      mutate(plot_ID=ifelse(HGVSp!="" & SYMBOL!="", paste0(SYMBOL,gsub(".*:p.","",HGVSp)), ID) ) %>%
+      group_by(ID) %>%
+      summarise(across(everything(), collapse_terms)) %>%
+      # decide on priority variants (rare nonsense/missense/frameshift)
+      rowwise() %>%
+      mutate(priority_flag = ifelse(
+        (str_detect(Consequence, "frameshift_variant|stop_gained|missense_variant") | gsub(";","",HGVSp) != "") & any(suppressWarnings(as.numeric(unlist(str_split(MAX_AF,";")))) < rare_cutoff, na.rm = T),
+        1,0
+      ))
+    
+    if(priority_only){
+      vep_info_cols <- vep_info_cols %>%
+        filter(priority_flag==1)
+    }  
+    
+    
+    priority_indices <- which(variants$variant %in% vep_info_cols$ID)
+    
+    if(priority_only){
+      message(paste0("Identified ", length(priority_indices), " priority variants"))
+    }
+    
+    variants <- variants %>%
+      right_join(vep_info_cols, by = c("variant"="ID"))
+    
+    # map priority variants back to unfiltered variants
+    final_keep_map <- keep_map[priority_indices]
+    
+    keep_idx <- rep(FALSE, length(keep_idx))
+    keep_idx[ keep_map[priority_indices] ] <- TRUE
+    
+  }
   
   
   # ---------- Process Genotypes -------------------------------
@@ -463,6 +648,7 @@ find_somatic_variants <- function(h5_in=NULL,
       hom_cnt_ct,
       ref_cnt_ct,
       data_cnt_ct,
+      alt_proportion_ct,
       alt_proportion_in_ct,
       alt_cnt_other,
       ref_cnt_other,
@@ -491,6 +677,10 @@ find_somatic_variants <- function(h5_in=NULL,
     
     tabix <- TabixFile(vcf_in, yieldSize = block)
     
+    if(isOpen(tabix)){
+      close(tabix)
+    }
+    
     param <- ScanVcfParam(
       fixed = c("ALT"),
       info = NA,     
@@ -514,6 +704,14 @@ find_somatic_variants <- function(h5_in=NULL,
       current_rows <- (raw_row_counter+1):(raw_row_counter+nrow(vcf))
       raw_row_counter <- raw_row_counter + nrow(vcf)
       keep_rows <- which(keep_idx[current_rows])
+      
+      if (length(keep_rows) == 0L) {
+        message(sprintf(
+          "Processing variants %d-%d / %d (0 kept in this chunk)",
+          variants_row_counter + 1L, variants_row_counter, nr
+        ))
+        next
+      }
       
       # find which rows to pull from variants df
       variant_rows <- (variants_row_counter+1):(variants_row_counter+length(keep_rows))
@@ -744,7 +942,7 @@ find_somatic_variants <- function(h5_in=NULL,
         .new_filter_labels = {
           labs <- c(
             "varcount_celltype"       = alt_cnt_ct  < min_varcount_celltype,
-            "varportion_celltype"     = alt_proportion_in_ct  < min_varportion_celltype,
+            "varportion_celltype"     = alt_proportion_ct  < min_varportion_celltype,
             "datacount_celltype"      = data_cnt_ct   < min_datacount_celltype,
             "varportion_in_celltype"  = alt_proportion_in_ct < min_varportion_in_celltype,
             "odds_ratio_cutoff"       = OR < odds_ratio_cutoff,
