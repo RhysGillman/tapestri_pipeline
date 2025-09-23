@@ -124,7 +124,7 @@ annotate_cells <- function(
   
   ggsave(file.path(plot_directory,paste0(sample_ID,"_SCINA_cell_annotations_UMAP.png")))
   
-  resolutions <- colnames(input@meta.data)[str_detect(colnames(seurat_1912@meta.data),"ADT_snn_res")] %>%
+  resolutions <- colnames(input@meta.data)[str_detect(colnames(input@meta.data),"ADT_snn_res")] %>%
     gsub(pattern="ADT_snn_res.",replacement="")
   
   ############################################
@@ -151,8 +151,8 @@ annotate_cells <- function(
     
     # heatmap marker expression
     DoHeatmap(
-      seurat_1912,
-      features = Features(seurat_1912),
+      input,
+      features = Features(input),
       group.by = res_col,
       raster   = TRUE,
       slot     = "data"

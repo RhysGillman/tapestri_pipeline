@@ -81,7 +81,7 @@ prepare_annotation_data <- function(
       geom_point(data = elb_plot %>% filter(dims > max_pca_dim), mapping = aes(dims, stdev), size = 5, color = 'red') +
       ggtitle(sample_ID) +
       theme_bw()
-    ggsave(file.path(qc_plot_directory,sample_ID,"pca_elbow_plot.png"),plot = elb_plot)
+    ggsave(file.path(qc_plot_directory,paste0(sample_ID,"_pca_elbow_plot.png")),plot = elb_plot)
   }
   
   ########
@@ -100,7 +100,7 @@ prepare_annotation_data <- function(
   obj@meta.data <- cbind(obj@meta.data, as.data.frame(obj@reductions$umap@cell.embeddings)[rownames(obj@meta.data),c(1:2)])
   
   if(!is.null(save_directory)){
-    saveRDS(obj,file.path(save_directory,sample_ID,"_seurat_obj.rds"))
+    saveRDS(obj,file.path(save_directory,paste0(sample_ID,"_seurat_obj.rds")))
   }
   
   return(obj)
