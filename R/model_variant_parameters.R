@@ -84,8 +84,8 @@ model_variant_parameters <- function(h5_in=NULL, vcf_in=NULL, plot_dir, prep_vcf
       #data_proportion_total <- ifelse(data_cnt_total > 0, data_cnt_total/ nc, 0)
       
       ## Calculate means/medians only when AF>0 (mask)
-      #mask <- is.finite(AFb) & (AFb > 0)
-      mask <- NGTb %in% c(1L,2L)
+      mask <- is.finite(AFb) & (AFb > 0)
+      #mask <- NGTb %in% c(1L,2L)
       dim(mask) <- dim(NGTb)
       denom <- pmax(1L, rowSums(mask))
       mean_AF_total <- rowSums(AFb * mask, na.rm = TRUE) / denom

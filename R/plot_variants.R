@@ -5,6 +5,7 @@
 #' @param seurat_object Input seurate object
 #' @param variant Variant to be annotated
 #' @param genotypes_file Path to the *_genotypes.tsv file containing cell-specific variant info
+#' @param sankey_epsilon Sankey Plot: Minimum fraction of a mutation’s cells that must also carry its parent mutation for the child–parent link to be accepted (tolerance for dropout/noise)
 #' @return Seurat object
 #' @export
 
@@ -25,7 +26,8 @@ plot_variants <- function(
     min_varcount_total  = 20,
     max_alt_portion_total = 0.5,
     topn_col="padj",
-    font_size_multiplyer=1
+    font_size_multiplyer=1,
+    sankey_epsilon=0.9
 ){
   #########
   # Files #
@@ -88,8 +90,7 @@ plot_variants <- function(
       filter(alt_proportion_total <= max_alt_portion_total)
     
     
-    variants <- variant_rows$plot_ID
-    names(variants) <- variant_rows$variant
+    variants <- variant_rows %>% dplyr::select(variant,plot_ID) %>% unique() %>% deframe()
     
   }else{
     
@@ -132,9 +133,7 @@ plot_variants <- function(
         filter(variant %in% sig_variants)
     }
     
-    
-    variants <- variant_rows$plot_ID
-    names(variants) <- variant_rows$variant
+    variants <- variant_rows %>% dplyr::select(variant,plot_ID) %>% unique() %>% deframe()
     
     message(paste0("Search returned ", length(variants), " variants"))
     
@@ -160,7 +159,7 @@ plot_variants <- function(
              MAX_AF=as.double(MAX_AF)))
   } %>%
     # deal with special case duplicate plot_IDs
-    mutate(plot_ID=ifelse(plot_ID %in% plot_ID[which(duplicated(plot_ID))], paste0(plot_ID,"(",variant,")"), plot_ID)) %>%
+    #mutate(plot_ID=ifelse(plot_ID %in% plot_ID[which(duplicated(plot_ID))], paste0(plot_ID,"(",variant,")"), plot_ID)) %>%
     dplyr::select(`variant`,plot_ID, ends_with("count")) %>%
     pivot_longer(-c(`variant`,plot_ID),names_to="col", values_to="count") %>%
     mutate(cell_type=gsub("_alt_count|_data_count","",col),
@@ -192,32 +191,6 @@ plot_variants <- function(
   if(length(variants) <= 3){
     message("Skipping Upset plot due to too few variants returned")
   }else{
-    is_mutated = function(s) {
-      components <- unlist(str_split(s, ";"))
-      NGT <- components[which(genotype_format_fields=="NGT")]
-      return(suppressWarnings(as.numeric(NGT)) %in% c(1,2))
-    }
-    
-    
-    sel_idx <- match(barcodes, genotype_cols)
-    
-    upset_data <- foreach(v = names(variants)) %do% {
-      dt <- data.table::fread(
-        cmd       = sprintf("grep -Fwm1 -- %s %s", shQuote(v), shQuote(genotype_file)),
-        sep       = "\t",
-        header    = FALSE,
-        select    = sel_idx,
-        col.names = barcodes,
-        showProgress = FALSE
-      )
-      
-      if (nrow(dt) == 0L) return(character(0))
-      mutated <- vapply(dt, is_mutated, logical(1))
-      names(mutated)[mutated]
-    }
-    
-    
-    
     
     upset_data <- foreach(v=names(variants)) %do% {
       variant_row <- data.table::fread(
@@ -228,7 +201,7 @@ plot_variants <- function(
         setNames(genotype_cols) %>%
         filter(variant==v)
       variant_row <- variant_row[barcodes]
-      mutated <- vapply(variant_row, is_mutated, logical(1))
+      mutated <- vapply(variant_row, .is_mutated, logical(1))
       names(which(mutated))
       
     }
@@ -415,6 +388,43 @@ plot_variants <- function(
     ggsave(plot = AF_plots, file.path(plot_directory,paste0(plot_prefix,"_umap_variants_AF.png")),  width = 40, height = 50, units = "cm")
     message(paste0("Saved allele-frequency UMAP plot to "), file.path(plot_directory,paste0(plot_prefix,"_umap_variants_AF.png")))
   }
+  
+  ###############
+  # Sankey Plot #
+  ###############
+  
+  mut_matrix <- foreach(v=names(variants), .combine="bind_rows") %do% {
+    variant_row <- data.table::fread(
+      cmd = sprintf("grep -Fw '%s' '%s'", v, genotype_file),
+      sep = "\t"
+    ) %>% 
+      as.data.frame() %>%
+      setNames(genotype_cols) %>%
+      filter(variant==v)
+    variant_row <- variant_row[barcodes]
+    vapply(variant_row, .is_mutated, logical(1))
+  } %>%
+    as.matrix()
+  
+  rownames(mut_matrix) <- variants
+  
+  
+  sk <- .make_sankey_from_mutmat(M=mut_matrix, epsilon = sankey_epsilon, add_terminals = F)
+  
+  
+  p <- sankeyNetwork(
+    Links = sk$links,
+    Nodes = sk$nodes,
+    Source = "source",
+    Target = "target",
+    Value  = "value",
+    NodeID = "name",
+    fontSize = 12, nodeWidth = 24, sinksRight = FALSE
+  )
+  
+  
+  htmlwidgets::saveWidget(p, file = file.path(plot_directory,paste0(plot_prefix,"_sankey.html")))
+  message(paste0("Saved Sankey plot to "), file.path(plot_directory,paste0(plot_prefix,"_sankey.html")))
 }
 
 
@@ -525,4 +535,74 @@ plot_variants <- function(
       drop   = FALSE,
       guide  = "none"
     )
+}
+
+.is_mutated = function(s) {
+  components <- unlist(str_split(s, ";"))
+  NGT <- components[which(genotype_format_fields=="NGT")]
+  return(suppressWarnings(as.numeric(NGT)) %in% c(1,2))
+}
+
+
+.make_sankey_from_mutmat <- function(M, epsilon = 0.9, add_terminals = TRUE) {
+  stopifnot(all(M %in% c(0,1)))
+  mut <- rownames(M)
+  names(mut) <- NULL
+  if (is.null(mut)){
+    mut <- paste0("var", seq_len(nrow(M)))
+    rownames(M) <- mut
+  } 
+  prev <- rowMeans(M)
+  ord  <- order(prev, decreasing = TRUE)
+  M    <- M[ord, , drop = FALSE]
+  mut  <- mut[ord]
+  prev <- prev[ord]
+  
+  # Parent assignment
+  parent <- rep("ROOT", length(mut))
+  names(parent) <- mut
+  for (i in seq_along(mut)) {
+    if (i == 1L) next
+    child <- mut[i]
+    cand  <- mut[seq_len(i-1)]
+    if (length(cand)) {
+      frac <- sapply(cand, function(p)
+        sum(M[child, ] & M[p, ]) / max(1L, sum(M[child, ]))
+      )
+      pbest <- names(frac)[which.max(frac)]
+      if (max(frac) >= epsilon) parent[child] <- pbest
+    }
+  }
+  
+  # Nodes list
+  nodes <- data.frame(name = c("All cells", mut), stringsAsFactors = FALSE)
+  node_index <- setNames(seq_len(nrow(nodes)) - 1L, nodes$name) # 0-based for d3
+  
+  # Links: parent -> child with value = #cells in intersection
+  links <- lapply(mut, function(ch) {
+    par <- parent[ch]
+    from <- if (par == "ROOT") "All cells" else par
+    value <- sum(M[ch, ] & if (par == "ROOT") rep(1, ncol(M)) else M[names(par), ])
+    data.frame(source = node_index[from], target = node_index[ch], value = value)
+  }) |> bind_rows()
+  
+  # Optional terminal sinks: child -> "No further mutation (child)"
+  if (add_terminals) {
+    term_links <- lapply(mut, function(ch) {
+      only_ch <- sum(M[ch, ] & !(Reduce("|", lapply(mut[which(parent == ch)], function(cc) M[cc, ]), init = rep(FALSE, ncol(M)))))
+      if (only_ch > 0) {
+        term_name <- paste0(ch, " only")
+        # add node if new
+        if (!(term_name %in% nodes$name)) {
+          nodes <<- bind_rows(nodes, data.frame(name = term_name))
+          node_index <<- setNames(seq_len(nrow(nodes)) - 1L, nodes$name)
+        }
+        data.frame(source = node_index[ch], target = node_index[term_name], value = only_ch)
+      } else NULL
+    })
+    term_links <- bind_rows(term_links[!sapply(term_links, is.null)])
+    if (nrow(term_links)) links <- bind_rows(links, term_links)
+  }
+  
+  list(nodes = nodes, links = links)
 }
