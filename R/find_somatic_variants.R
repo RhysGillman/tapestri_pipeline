@@ -19,14 +19,18 @@ find_somatic_variants <- function(h5_in=NULL,
                                   skip_vep = F,
                                   priority_only=F,
                                   block = 1000,
+                                  # Call-Level thresholds
+                                  min_DP_per_call= 10, 
+                                  min_GQ_per_call= 30,
                                   # Variant-level thresholds
-                                  min_varcount_total        = 1,
+                                  min_varcount_total        = 30,
                                   min_varportion_total      = 0,
                                   max_varportion_total      = 0.7,
-                                  min_datacount_total       = 1,
-                                  min_dataportion_total     = 0,
-                                  min_quality_mean_total    = 0,
+                                  min_datacount_total       = 100,
+                                  min_dataportion_total     = 0.25,
+                                  min_quality_mean_total    = 0.3,
                                   min_allelefreq_mean_total = 0,
+                                  min_allelefreq_mean_mutants = 0.1,
                                   rare_cutoff = 0.02,
                                   # celltype-specific thresholds
                                   min_varcount_celltype     = 1,
@@ -299,6 +303,7 @@ find_somatic_variants <- function(h5_in=NULL,
       dplyr::select(ID, SYMBOL, Gene, Feature, HGVSp, MAX_AF, Consequence, Existing_variation, BIOTYPE, SIFT, PolyPhen) %>%
       # generate a user-friendly plot label
       mutate(plot_ID=ifelse(HGVSp!="" & SYMBOL!="", paste0(SYMBOL,gsub(".*:p.","",HGVSp)), ID) ) %>%
+      mutate(plot_ID=ifelse(plot_ID %in% plot_ID[which(duplicated(plot_ID))], paste0(plot_ID,"(",ID,")"), plot_ID)) %>%
       group_by(ID) %>%
       summarise(across(everything(), collapse_terms)) %>%
       # decide on priority variants (rare nonsense/missense/frameshift)
@@ -416,6 +421,13 @@ find_somatic_variants <- function(h5_in=NULL,
       
       dimnames(AFb) <- dimnames(trueDPb) <- dimnames(GQb) <- dimnames(NGTb) <- list(NULL, barcodes)
       
+      # Apply per-call filters
+      
+      pass_call <- (trueDPb >= min_DP_per_call) & (GQb >= min_GQ_per_call)
+      AFb[!pass_call] <- NA_real_
+      GQb[!pass_call] <- NA_real_
+      NGTb[!pass_call] <- 3L
+      
       # calculate variant-level stats
       var_stats <- .calculate_variant_level_stats(NGT = NGTb,AF = AFb, GQ = GQb)
       
@@ -435,7 +447,8 @@ find_somatic_variants <- function(h5_in=NULL,
               "min_datacount_total"     = data_cnt_total       < min_datacount_total,
               "min_dataportion_total"   = data_proportion_total< min_dataportion_total,
               "min_quality_mean_total"  = mean_GQ_total        < min_quality_mean_total,
-              "min_allelefreq_mean_total" = mean_AF_total      < min_allelefreq_mean_total
+              "min_allelefreq_mean_total" = mean_AF_total      < min_allelefreq_mean_total,
+              "min_allelefreq_mean_mutants" = mean_AF_mutants  < min_allelefreq_mean_mutants
             )
             out <- paste(names(which(labs)), collapse = ";")
             if (out == "") "." else out
@@ -567,6 +580,13 @@ find_somatic_variants <- function(h5_in=NULL,
       GQb     <- as.matrix(GQ[rows, , drop = FALSE])
       NGTb    <- as.matrix(NGT[rows, , drop = FALSE])
       
+      # Apply per-call filters
+      
+      pass_call <- (DPb >= min_DP_per_call) & (GQb >= min_GQ_per_call)
+      AFb[!pass_call] <- NA_real_
+      GQb[!pass_call] <- NA_real_
+      NGTb[!pass_call] <- 3L
+      
       var_stats <- .calculate_variant_level_stats(NGT = NGTb,AF = AFb, GQ = GQb)
       
       # assemble lines
@@ -585,7 +605,8 @@ find_somatic_variants <- function(h5_in=NULL,
               "min_datacount_total"     = data_cnt_total       < min_datacount_total,
               "min_dataportion_total"   = data_proportion_total< min_dataportion_total,
               "min_quality_mean_total"  = mean_GQ_total        < min_quality_mean_total,
-              "min_allelefreq_mean_total" = mean_AF_total      < min_allelefreq_mean_total
+              "min_allelefreq_mean_total" = mean_AF_total      < min_allelefreq_mean_total,
+              "min_allelefreq_mean_mutants" = mean_AF_mutants  < min_allelefreq_mean_mutants
             )
             out <- paste(names(which(labs)), collapse = ";")
             if (out == "") "." else out
@@ -916,6 +937,16 @@ find_somatic_variants <- function(h5_in=NULL,
   AF_na <- AF; AF_na[!mask] <- NA_real_
   median_AF_total <- matrixStats::rowMedians(AF_na, na.rm = TRUE)
   
+  ## Same as above but only for cells called as mutatns in NGT
+  mask <- NGT %in% c(1L,2L)
+  dim(mask) <- dim(NGT)
+  denom <- pmax(1L, rowSums(mask))
+  mean_AF_mutants <- rowSums(AF * mask, na.rm = TRUE) / denom
+  mean_AF_mutants[rowSums(mask) == 0] <- NA_real_
+  AF_na <- AF; AF_na[!mask] <- NA_real_
+  median_AF_mutants <- matrixStats::rowMedians(AF_na, na.rm = TRUE)
+  
+  
   # GQ mean where AF>0
   GQuse <- GQ
   GQuse[!mask] <- NA_real_
@@ -929,7 +960,9 @@ find_somatic_variants <- function(h5_in=NULL,
     ref_cnt_total,
     data_cnt_total,
     alt_proportion_total,
-    data_proportion_total
+    data_proportion_total,
+    mean_AF_mutants,
+    median_AF_mutants
   )
   return(out)
 }
