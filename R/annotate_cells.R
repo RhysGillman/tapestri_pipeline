@@ -8,7 +8,7 @@
 #' @param CellMarker_path Path to CellMarker2.0 
 #' @param celltypes Can be used to limit the set of possible celltypes to be considered
 #' @param tissue Only required if using CellMarker2.0
-#' @param scina_probability_thresdhold Only keep celltype assignments with probability above this thresholds (Default 0.5)
+#' @param scina_probability_threshold Only keep celltype assignments with probability above this thresholds (Default 0.5)
 #' @return Seurat object
 #' @export
 
@@ -20,7 +20,7 @@ annotate_cells <- function(
     CellMarker_path=NULL,
     celltypes=NULL,
     tissue="normal peripheral blood",
-    scina_probability_thresdhold=0.5
+    scina_probability_threshold=0.5
     
 ){
   
@@ -100,7 +100,7 @@ annotate_cells <- function(
   
   final_annotations <- rbind(df_known, df_unknown) %>%
     # filter annotations
-    mutate(cell_type=ifelse(probability<scina_probability_thresdhold, "unknown",cell_type)) %>%
+    mutate(cell_type=ifelse(probability<scina_probability_threshold, "unknown",cell_type)) %>%
     dplyr::select(cell_barcode,cell_type) %>%
     deframe()
   
