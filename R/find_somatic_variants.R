@@ -44,7 +44,9 @@ find_somatic_variants <- function(h5_in=NULL,
                                   # Sorting options
                                   celltype_sort_value = "p",
                                   all_sort_column      = "mean_GQ_total",
-                                  overwrite=TRUE,
+                                  overwrite_variant_summary=TRUE,
+                                  overwrite_celltype_enrichment=TRUE,
+                                  run_cell_type_enrichment=TRUE,
                                   genome_version="hg19",
                                   threads=4
                           ) {
@@ -90,7 +92,7 @@ find_somatic_variants <- function(h5_in=NULL,
   
   for(path in c(genotype_file,summary_file,summary_pass_file,summary_pass_priority_file,counts_per_cell_type_file)){
     if(file.exists(path)){
-      if(overwrite){
+      if(overwrite_variant_summary){
         message(paste0("Removing ", path, "..."))
         file.remove(path)
       }else{
@@ -109,7 +111,7 @@ find_somatic_variants <- function(h5_in=NULL,
     
     for(path in c(ct_file,ct_pass_file,ct_pass_priority_file)){
       if(file.exists(path)){
-        if(overwrite){
+        if(overwrite_celltype_enrichment){
           message(paste0("Removing ", path, "..."))
           file.remove(path)
         }else{
@@ -118,6 +120,8 @@ find_somatic_variants <- function(h5_in=NULL,
       }
     }
   }
+  
+  vep_file <- file.path(out_dir, paste0(file_prefix, "_vep_annotated.vcf"))
   
   #############################################################
   # ------------------- Get Cell Barcodes ------------------- #
@@ -264,28 +268,32 @@ find_somatic_variants <- function(h5_in=NULL,
   
   if(!skip_vep){
     
-    # Generate VEP Input
-    vep_in <- variants %>%
-      mutate(allele=paste0(reference_allele,"/",alternate_allele),
-             strand="+") %>%
-      dplyr::select(chromosome, start_position, end_position, allele, strand, variant)
-    write_tsv(vep_in, file.path(out_dir,paste0(file_prefix,"_vep_in.tsv")), col_names = F)
-    
-    # Run VEP
-    message("Annotating variants using ENSEMBL-vep...")
-    
-    vep_run <- run_vep(
-      file.path(out_dir, paste0(file_prefix, "_vep_in.tsv")),
-      output = file.path(out_dir, paste0(file_prefix, "_vep_annotated.vcf")),
-      return = "data.frame",
-      args = c(
-        "--force_overwrite",
-        "--biotype","--domains",
-        "--max_af","--check_existing","--numbers","--regulatory",
-        "--sift","b","--polyphen","b", "--hgvs", "--flag_pick_allele_gene"
+    if(file.exists(vep_file) & !overwrite_variant_summary){
+      message(paste0("Reading in existing VEP results from ", vep_file))
+      vep_run <- .parse_vep_vcf(vep_file)
+    }else{
+      # Generate VEP Input
+      vep_in <- variants %>%
+        mutate(allele=paste0(reference_allele,"/",alternate_allele),
+               strand="+") %>%
+        dplyr::select(chromosome, start_position, end_position, allele, strand, variant)
+      write_tsv(vep_in, file.path(out_dir,paste0(file_prefix,"_vep_in.tsv")), col_names = F)
+      
+      # Run VEP
+      message("Annotating variants using ENSEMBL-vep...")
+      
+      vep_run <- run_vep(
+        file.path(out_dir, paste0(file_prefix, "_vep_in.tsv")),
+        output = vep_file,
+        return = "data.frame",
+        args = c(
+          "--force_overwrite",
+          "--biotype","--domains",
+          "--max_af","--check_existing","--numbers","--regulatory",
+          "--sift","b","--polyphen","b", "--hgvs", "--flag_pick_allele_gene"
+        )
       )
-    )
-    
+    }
     # Wrangle VEP Output and find priority variants
     
     message("Retrieving VEP annotations and finding priority variants...")
@@ -517,20 +525,26 @@ find_somatic_variants <- function(h5_in=NULL,
         bind_cols(block_per_cell_info)
       
       write_tsv(block_per_cell_info, genotype_file, append = TRUE, col_names = first_block)
-       
-      for (ct in analysis_cell_types) {
+      
+      if(run_cell_type_enrichment){
         
-        # stores cell type-specific stats for all variants
-        ct_file <- file.path(out_dir,paste0(file_prefix,"_",ct,".tsv"))
-        
-        ct_stats <- .calculate_cell_type_stats(NGTb,ct,cell_annotations,var_stats)
-        
-        stats_block_ct <- block_summary %>%
-          bind_cols(ct_stats) 
-        
-        write_tsv(stats_block_ct, ct_file, append = TRUE, col_names = first_block)
-        
+      
+       # per cell type stats
+        for (ct in analysis_cell_types) {
+          
+          # stores cell type-specific stats for all variants
+          ct_file <- file.path(out_dir,paste0(file_prefix,"_",ct,".tsv"))
+          
+          ct_stats <- .calculate_cell_type_stats(NGTb,ct,cell_annotations,var_stats)
+          
+          stats_block_ct <- block_summary %>%
+            bind_cols(ct_stats) 
+          
+          write_tsv(stats_block_ct, ct_file, append = TRUE, col_names = first_block)
+          
+        }
       }
+        
       first_block <- FALSE
     }
     close(tabix)
@@ -675,16 +689,22 @@ find_somatic_variants <- function(h5_in=NULL,
       
       write_tsv(block_per_cell_info, genotype_file, append = TRUE, col_names = first_block)
       
-      for (ct in analysis_cell_types) {
+      if(run_cell_type_enrichment){
         
-        ct_file <- file.path(out_dir,paste0(file_prefix,"_",ct,".tsv"))
         
-        ct_stats <- .calculate_cell_type_stats(NGTb,ct,cell_annotations,var_stats)
-        
-        stats_block_ct <- block_summary %>%
-          bind_cols(ct_stats) 
-        
-        write_tsv(stats_block_ct, ct_file, append = TRUE, col_names = first_block)
+        # per cell type stats
+      
+        for (ct in analysis_cell_types) {
+          ct_file <- file.path(out_dir,paste0(file_prefix,"_",ct,".tsv"))
+          
+          ct_stats <- .calculate_cell_type_stats(NGTb,ct,cell_annotations,var_stats)
+          
+          stats_block_ct <- block_summary %>%
+            bind_cols(ct_stats) 
+          
+          write_tsv(stats_block_ct, ct_file, append = TRUE, col_names = first_block)
+          
+        }
         
       }
       first_block <- FALSE
@@ -693,85 +713,86 @@ find_somatic_variants <- function(h5_in=NULL,
   
   
   
-  
-  # sorting
-  
-  ## read in just sorting column
-  ## sort
-  ## get indexes
-  ## rewrite file block-wise using index
-  
-  # padj
-  ## read in p-value col
-  ## adjust pvalues
-  ## re-write block-wise using index
-  
-  message("Sorting and Adjusting P Values...")
-  
-  for (ct in analysis_cell_types) {
-    # stores cell type-specific stats for all variants
-    ct_file <- file.path(out_dir,paste0(file_prefix,"_",ct,".tsv"))
-    # stores cell type-specific stats for passing variants
-    ct_pass_file <- file.path(out_dir,paste0(file_prefix,"_",ct,"_pass_only.tsv"))
-    # stores cell type-specific stats for passing priority variants
-    ct_pass_priority_file <- file.path(out_dir,paste0(file_prefix,"_",ct,"_pass_only_priority.tsv"))
+  if(run_cell_type_enrichment){
+    # sorting
     
-    full_results <- fread(ct_file) %>%
-      #adjust p-values
-      adjust_pvalue(p.col="p",output.col = "padj",method = "BH") %>%
-      # filtering
-      rowwise() %>%
-      mutate(
-        # Build the new, cell-type-specific filter labels
-        .new_filter_labels = {
-          labs <- c(
-            "varcount_celltype"       = alt_cnt_ct  < min_varcount_celltype,
-            "varportion_celltype"     = alt_proportion_ct  < min_varportion_celltype,
-            "datacount_celltype"      = data_cnt_ct   < min_datacount_celltype,
-            "varportion_in_celltype"  = alt_proportion_in_ct < min_varportion_in_celltype,
-            "odds_ratio_cutoff"       = OR < odds_ratio_cutoff,
-            "zscore_cutoff"           = Z_score < zscore_cutoff,
-            "p_value" = padj > max_p_value
-          )
-          out <- paste(names(which(labs)), collapse = ";")
-          if (out == "") "." else out
-        },
-        # Append to existing `filter` (which may be "." from your previous step)
-        filter = {
-          add <- .new_filter_labels
-          if (add == ".") {
-            filter
-          } else if (filter == ".") {
-            add
-          } else {
-            paste0(filter, ";", add)
+    ## read in just sorting column
+    ## sort
+    ## get indexes
+    ## rewrite file block-wise using index
+    
+    # padj
+    ## read in p-value col
+    ## adjust pvalues
+    ## re-write block-wise using index
+    
+    message("Sorting and Adjusting P Values...")
+    
+    for (ct in analysis_cell_types) {
+      # stores cell type-specific stats for all variants
+      ct_file <- file.path(out_dir,paste0(file_prefix,"_",ct,".tsv"))
+      # stores cell type-specific stats for passing variants
+      ct_pass_file <- file.path(out_dir,paste0(file_prefix,"_",ct,"_pass_only.tsv"))
+      # stores cell type-specific stats for passing priority variants
+      ct_pass_priority_file <- file.path(out_dir,paste0(file_prefix,"_",ct,"_pass_only_priority.tsv"))
+      
+      full_results <- fread(ct_file) %>%
+        #adjust p-values
+        adjust_pvalue(p.col="p",output.col = "padj",method = "BH") %>%
+        # filtering
+        rowwise() %>%
+        mutate(
+          # Build the new, cell-type-specific filter labels
+          .new_filter_labels = {
+            labs <- c(
+              "varcount_celltype"       = alt_cnt_ct  < min_varcount_celltype,
+              "varportion_celltype"     = alt_proportion_ct  < min_varportion_celltype,
+              "datacount_celltype"      = data_cnt_ct   < min_datacount_celltype,
+              "varportion_in_celltype"  = alt_proportion_in_ct < min_varportion_in_celltype,
+              "odds_ratio_cutoff"       = OR < odds_ratio_cutoff,
+              "zscore_cutoff"           = Z_score < zscore_cutoff,
+              "p_value" = padj > max_p_value
+            )
+            out <- paste(names(which(labs)), collapse = ";")
+            if (out == "") "." else out
+          },
+          # Append to existing `filter` (which may be "." from your previous step)
+          filter = {
+            add <- .new_filter_labels
+            if (add == ".") {
+              filter
+            } else if (filter == ".") {
+              add
+            } else {
+              paste0(filter, ";", add)
+            }
           }
-        }
-      ) %>%
-      dplyr::select(-.new_filter_labels) %>%
-      ungroup()
-    
-    
-    if(celltype_sort_value=="p"){
-      full_results <- full_results %>%
-        arrange(padj)
-    }
-    
-    if(!priority_only){
-      write_tsv(full_results, ct_file, append = FALSE, col_names = TRUE)
+        ) %>%
+        dplyr::select(-.new_filter_labels) %>%
+        ungroup()
       
-      write_tsv(full_results %>%
-                  filter(filter==".") %>%
-                  dplyr::select(-filter), ct_pass_file, append = FALSE, col_names = TRUE)
-      write_tsv(full_results %>%
-                  filter(filter==".",priority_flag==1) %>%
-                  dplyr::select(-c(filter,priority_flag)), ct_pass_priority_file, append = FALSE, col_names = TRUE)
       
-    }else{
-      write_tsv(full_results, ct_file, append = FALSE, col_names = TRUE)
-      write_tsv(full_results %>%
-                  filter(filter==".") %>%
-                  dplyr::select(-filter), ct_pass_priority_file, append = FALSE, col_names = TRUE)
+      if(celltype_sort_value=="p"){
+        full_results <- full_results %>%
+          arrange(padj)
+      }
+      
+      if(!priority_only){
+        write_tsv(full_results, ct_file, append = FALSE, col_names = TRUE)
+        
+        write_tsv(full_results %>%
+                    filter(filter==".") %>%
+                    dplyr::select(-filter), ct_pass_file, append = FALSE, col_names = TRUE)
+        write_tsv(full_results %>%
+                    filter(filter==".",priority_flag==1) %>%
+                    dplyr::select(-c(filter,priority_flag)), ct_pass_priority_file, append = FALSE, col_names = TRUE)
+        
+      }else{
+        write_tsv(full_results, ct_file, append = FALSE, col_names = TRUE)
+        write_tsv(full_results %>%
+                    filter(filter==".") %>%
+                    dplyr::select(-filter), ct_pass_priority_file, append = FALSE, col_names = TRUE)
+      }
     }
   }
 }
