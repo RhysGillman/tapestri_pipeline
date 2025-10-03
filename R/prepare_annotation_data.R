@@ -15,7 +15,10 @@ prepare_annotation_data <- function(
   sample_ID=NULL,
   cluster_resolutions=c(0.2, 0.35, 0.5, 0.8, 1, 1.2),
   save_directory=NULL,
-  qc_plot_directory=NULL
+  qc_plot_directory=NULL,
+  variance_quantile=0.25, # top quantile (0-1) of variance to use for UMAP
+  neighbor_metric="euclidean",
+  k_param=50
 ){
   if(is.null(sample_ID)){
     sample_ID = gsub(".dna[+]protein.h5", "", sort(basename(input_file)))
@@ -40,29 +43,35 @@ prepare_annotation_data <- function(
   
   # CLR-normalize across cells
   obj <- NormalizeData(obj, normalization.method = "CLR", margin = 2)
-  # scaled data
-  obj <- ScaleData(obj, assay = "ADT", layer = "data")  # writes layer "scale.data"
+  
   
   # Drop any zero-variance or non-finite features
-  mat <- GetAssayData(obj, assay = "ADT", layer = "scale.data")
-  keep <- matrixStats::rowVars(as.matrix(mat)) > 0 & Matrix::rowSums(is.finite(mat)) == ncol(mat)
+  norm_mat <- GetAssayData(obj, assay = "ADT", layer = "data")
+  
+  vars <- matrixStats::rowVars(as.matrix(norm_mat))
+  thresh <- quantile(vars, variance_quantile)
+  
+  keep <- vars > thresh & Matrix::rowSums(is.finite(norm_mat)) == ncol(norm_mat)
   if (any(!keep)) {
-    message(paste0("Warning: The following features are being removed due to having no variance or non-finite values\n",paste(names(which(keep==F)),collapse = "\n")))
-    obj <- subset(obj, features = rownames(mat)[keep])
-    mat <- mat[keep, , drop = FALSE]
+    message(paste0("Warning: The following features are being removed due to having low variance or non-finite values\n",paste(names(which(keep==F)),collapse = "\n")))
+    obj <- subset(obj, features = names(keep)[keep])
   }
+  
+  
+  # scaled data
+  obj <- ScaleData(obj, assay = "ADT", layer = "data")  # writes layer "scale.data"
   
   ###########
   # Run PCA #
   ###########
   # calculate reasonable number of PCs
-  npcs <- min(20L, nrow(mat), ncol(mat) - 1L)
+  npcs <- min(20L, nrow(obj), ncol(obj) - 1L)
   
   obj <- RunPCA(
     object  = obj,
     assay   = "ADT",
     layer   = "scale.data",
-    features = rownames(mat),
+    features = names(keep)[keep],
     npcs    = npcs,
     approx  = FALSE,
     verbose = FALSE
@@ -73,8 +82,12 @@ prepare_annotation_data <- function(
   ##############
   # Take only PCs which have a change in variation is > 0.1% from the next -- OTHERWISE, can just use 7
   elb_plot <- ElbowPlot(obj, ndims=30)$data
+
   pct <- elb_plot$stdev
   max_pca_dim <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+  
+  if(is.na(max_pca_dim)) max_pca_dim <- 7
+  
   if(!is.null(qc_plot_directory)){
     elb_plot <- ggplot() + 
       geom_point(data = elb_plot %>% filter(dims <= max_pca_dim), mapping = aes(dims, stdev), size = 5, color = 'green') +
@@ -87,12 +100,40 @@ prepare_annotation_data <- function(
   ########
   # UMAP #
   ########
+  set.seed(123)
+  obj <- FindNeighbors(obj, reduction = "pca", 
+                       dims = 1:max_pca_dim,
+                       annoy.metric = neighbor_metric,
+                       k.param=k_param)
+  nn_name <- grep("_nn$", names(obj@graphs), value = TRUE)[1]
   
-  obj <- RunUMAP(obj, reduction = "pca", dims = 1:max_pca_dim, min.dist = 0.3)
-  obj <- FindNeighbors(obj, reduction = "pca", dims = 1:max_pca_dim,k.param=20)
+  obj <- RunUMAP(obj, 
+                 reduction = "pca",
+                 dims = 1:max_pca_dim,
+                 metric = neighbor_metric,
+                 n.neighbors=k_param,
+                 min.dist = 0.3)
+  
   
   for (res in cluster_resolutions) {
-    obj <- FindClusters(obj, resolution = res,random.seed=888)
+    obj <- FindClusters(obj, resolution = res,random.seed=123)
+    if(!is.null(qc_plot_directory)){
+      res_col <- paste0("ADT_snn_res.", res)
+      DimPlot(obj,
+              reduction = "umap",
+              group.by  = res_col,
+              label     = TRUE,
+              repel     = TRUE, label.box = T) +
+        ggtitle(paste("Seurat Clusters at Resolution: ",res))
+      ggsave(file.path(qc_plot_directory,paste0(sample_ID,"_seurat_clusters_res_",res,"_umap.png")))
+      DimPlot(obj,
+              reduction = "pca",
+              group.by  = res_col,
+              label     = TRUE,
+              repel     = TRUE, label.box = T) +
+        ggtitle(paste("Seurat Clusters at Resolution: ",res))
+      ggsave(file.path(qc_plot_directory,paste0(sample_ID,"_seurat_clusters_res_",res,"_pca.png")))
+    }
   }
   
   obj@meta.data$sample_ID <- sample_ID
