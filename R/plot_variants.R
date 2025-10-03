@@ -5,7 +5,6 @@
 #' @param seurat_object Input seurate object
 #' @param variant Variant to be annotated
 #' @param genotypes_file Path to the *_genotypes.tsv file containing cell-specific variant info
-#' @param sankey_epsilon Sankey Plot: Minimum fraction of a mutation’s cells that must also carry its parent mutation for the child–parent link to be accepted (tolerance for dropout/noise)
 #' @return Seurat object
 #' @export
 
@@ -26,8 +25,7 @@ plot_variants <- function(
     min_varcount_total  = 20,
     max_alt_portion_total = 0.5,
     topn_col="padj",
-    font_size_multiplyer=1,
-    sankey_epsilon=0.9
+    font_size_multiplyer=1
 ){
   #########
   # Files #
@@ -38,6 +36,13 @@ plot_variants <- function(
   genotype_file <- file.path(result_dir,paste0(file_prefix,"_genotypes.tsv"))
   genotype_fmt_line <- readLines(genotype_file, n = 1L)
   genotype_format_fields <- strsplit(gsub("^#FORMAT=", "", genotype_fmt_line), ";", fixed = TRUE)[[1]]
+  
+  .is_mutated = function(s) {
+    components <- unlist(str_split(s, ";"))
+    NGT <- components[which(genotype_format_fields=="NGT")]
+    return(suppressWarnings(as.numeric(NGT)) %in% c(1,2))
+  }
+  
   genotype_cols <- colnames(data.table::fread(genotype_file, nrows = 2L, sep = "\t"))
   
   all_files <- list.files(
@@ -56,7 +61,7 @@ plot_variants <- function(
   summary_cols <- colnames(data.table::fread(summary_file, nrows = 2L, sep = "\t"))
   
   cell_types <- unique(str_extract(cell_type_files, pattern = paste0("^",file_prefix,"_(.*)_pass.*.tsv"), group = 1))
-  barcodes <- .detect_barcodes(genotype_file,genotype_format_fields)
+  barcodes <- .detect_barcodes(genotype_file)
   
   ########################
   # Variants of Interest #
@@ -100,20 +105,27 @@ plot_variants <- function(
       stop("search_col not found in variant data")
     }
     
+    message("Searching for variants:")
     variant_rows <- foreach(s=search, .combine = "bind_rows") %do% {
-      
+      message(s)
       fread(summary_file) %>%
+        as.data.frame() %>%
         filter(str_detect(.data[[search_col]], regex(s)))
-    } %>%
+    }
+    
+    message(paste0("Found: \n", paste(unique(variant_rows %>% pull(search_col)), collapse = "\n")))
+    
       # apply filters
+    variant_rows <- variant_rows %>%
       filter(alt_cnt_total >= min_varcount_total) %>%
       filter(alt_proportion_total <= max_alt_portion_total)
     
     if (isTRUE(damaging)) variant_rows <- filter(variant_rows, str_detect(SIFT,"Deleterious") | str_detect(PolyPhen,"damaging") )
     
-    
     if(nrow(variant_rows)==0){
       stop("ERROR: Search and filters returned no variants")
+    }else{
+      message(paste0("Remaning after filters: \n", paste(unique(variant_rows %>% pull(search_col)), collapse = "\n")))
     }
     
     # apply cell-type result filters
@@ -131,6 +143,10 @@ plot_variants <- function(
       
       variant_rows <- variant_rows %>%
         filter(variant %in% sig_variants)
+    }
+    
+    if(nrow(variant_rows)==0){
+      stop("ERROR: Search and filters returned no variants")
     }
     
     variants <- variant_rows %>% dplyr::select(variant,plot_ID) %>% unique() %>% deframe()
@@ -182,7 +198,7 @@ plot_variants <- function(
   
   ggsave(file.path(plot_directory,paste0(plot_prefix,"_barplot.png")))
   
-  message(paste0("Saved plot showing variant count per cell-type to "), file.path(plot_directory,paste0(plot_prefix,"_barplot.png")))
+  message(paste0("Saved plot showing variant count per cell-type to ", file.path(plot_directory,paste0(plot_prefix,"_barplot.png"))))
   
   ##############
   # Upset Plot #
@@ -344,7 +360,7 @@ plot_variants <- function(
           
         }else{
           p <- suppressMessages(FeaturePlot(seurat_object, features = feature, reduction = "umap", order = TRUE, pt.size = 1, ) +
-            ggplot2::ggtitle(paste0(type,": ", variant)) +
+            ggplot2::ggtitle(paste0(type,": ", v)) +
             scale_colour_gradient("AF", limits = c(0,1), breaks = c(0,0.5,1), low = "grey85", high = "red",
                                    oob = scales::squish, na.value = "grey85") +
             theme(plot.title = element_text(size = umap_plot_title_size),
@@ -408,46 +424,23 @@ plot_variants <- function(
   
   rownames(mut_matrix) <- variants
   
-  
-  sk <- .make_sankey_from_mutmat(M=mut_matrix, epsilon = sankey_epsilon, add_terminals = F)
-  
+  sk <- .make_sankey(
+    mut_matrix,
+    add_terminals = TRUE,
+    terminal_label = "",
+    omit_full_terminal = TRUE   # <— hides redundant 100% terminals
+  )
   
   p <- sankeyNetwork(
-    Links = sk$links,
-    Nodes = sk$nodes,
-    Source = "source",
-    Target = "target",
-    Value  = "value",
-    NodeID = "name",
-    fontSize = 12, nodeWidth = 24, sinksRight = FALSE
+    Links = sk$links, Nodes = sk$nodes,
+    Source = "source", Target = "target", Value = "value",
+    NodeID = "label", fontSize = 12, nodeWidth = 24, sinksRight = FALSE
   )
   
   
   htmlwidgets::saveWidget(p, file = file.path(plot_directory,paste0(plot_prefix,"_sankey.html")))
   message(paste0("Saved Sankey plot to "), file.path(plot_directory,paste0(plot_prefix,"_sankey.html")))
 }
-
-
-
-
-.detect_barcodes <- function(gt_file,genotype_format_fields){
-  head_file <- data.table::fread(gt_file, nrows = 10L, sep = "\t") %>%
-    as.matrix()
-  cols <- colnames(head_file)
-  matches_gt_format <- grepl(head_file,pattern=paste(rep("([0-9.]+|NA|NaN)",length(genotype_format_fields)), collapse = ";"))
-  dim(matches_gt_format) <- dim(head_file)
-  matches_gt_format <- apply(matches_gt_format,1, rle)
-  barcode_length <- lapply(matches_gt_format, function(x) tail(x$lengths,1)) %>%
-    unlist()
-  if(all(barcode_length==barcode_length[1])){
-    barcodes <- cols[(length(cols)-barcode_length[1]+1):length(cols)]
-  }else{
-    stop("Error: Couldn't detect barcodes from genotype file")
-  }
-  return(barcodes)
-}
-
-
 
 
 .assemble_feature_grid <- function(variant_plot_list,
@@ -537,72 +530,97 @@ plot_variants <- function(
     )
 }
 
-.is_mutated = function(s) {
-  components <- unlist(str_split(s, ";"))
-  NGT <- components[which(genotype_format_fields=="NGT")]
-  return(suppressWarnings(as.numeric(NGT)) %in% c(1,2))
-}
 
 
-.make_sankey_from_mutmat <- function(M, epsilon = 0.9, add_terminals = TRUE) {
-  stopifnot(all(M %in% c(0,1)))
-  mut <- rownames(M)
-  names(mut) <- NULL
-  if (is.null(mut)){
-    mut <- paste0("var", seq_len(nrow(M)))
-    rownames(M) <- mut
-  } 
-  prev <- rowMeans(M)
-  ord  <- order(prev, decreasing = TRUE)
-  M    <- M[ord, , drop = FALSE]
-  mut  <- mut[ord]
-  prev <- prev[ord]
+.make_sankey <- function(
+    M, add_terminals = TRUE, min_count = 1L,
+    terminal_label = "(none)",
+    show_root_residual_when_no_terminals = TRUE,
+    omit_full_terminal = TRUE
+){
+  stopifnot(is.matrix(M), all(M %in% c(0L,1L)))
+  if (is.null(rownames(M))) rownames(M) <- paste0("var", seq_len(nrow(M)))
   
-  # Parent assignment
-  parent <- rep("ROOT", length(mut))
-  names(parent) <- mut
-  for (i in seq_along(mut)) {
-    if (i == 1L) next
-    child <- mut[i]
-    cand  <- mut[seq_len(i-1)]
-    if (length(cand)) {
-      frac <- sapply(cand, function(p)
-        sum(M[child, ] & M[p, ]) / max(1L, sum(M[child, ]))
+  nodes <- data.frame(name = character(), label = character(), stringsAsFactors = FALSE)
+  node_index <- integer(0)
+  add_node <- function(name, label){
+    if (!name %in% names(node_index)) {
+      nodes <<- rbind(nodes, data.frame(name=name, label=label, stringsAsFactors=FALSE))
+      node_index <<- setNames(seq_len(nrow(nodes)) - 1L, nodes$name)
+    }
+    node_index[[name]]
+  }
+  links <- list()
+  
+  split_node <- function(cell_idx, remaining_vars, parent_uid, parent_label, is_root = FALSE){
+    if (length(remaining_vars) == 0L || length(cell_idx) == 0L) return(invisible())
+    parent_id <- add_node(parent_uid, parent_label)
+    
+    # order by prevalence in this subset
+    prev <- rowSums(M[remaining_vars, cell_idx, drop=FALSE]) / length(cell_idx)
+    remaining_vars <- remaining_vars[order(prev, decreasing = TRUE)]
+    
+    residual <- cell_idx
+    made_child <- FALSE
+    
+    for (v in remaining_vars) {
+      yes_cells <- residual[M[v, residual] == 1L]
+      if (length(yes_cells) >= min_count) {
+        made_child <- TRUE
+        v_name <- rownames(M)[v]
+        child_uid <- paste0(parent_uid, "|", v_name)
+        child_id  <- add_node(child_uid, v_name)
+        
+        links[[length(links)+1L]] <<- data.frame(
+          source = parent_id, target = child_id, value = length(yes_cells)
+        )
+        
+        lower_vars <- setdiff(remaining_vars, v)
+        split_node(yes_cells, lower_vars, child_uid, v_name, is_root = FALSE)
+        
+        residual <- setdiff(residual, yes_cells)
+      }
+      if (!length(residual)) break
+    }
+    
+    if (add_terminals) {
+      # size checks
+      res_n <- length(residual)
+      par_n <- length(cell_idx)
+      
+      if (res_n > 0L) {
+        # If terminal would be 100% and we're omitting, skip it
+        if (omit_full_terminal && res_n == par_n) {
+          # no terminal link
+        } else {
+          term_uid <- paste0(parent_uid, "|", terminal_label)
+          term_id  <- add_node(term_uid, terminal_label)
+          links[[length(links)+1L]] <<- data.frame(
+            source = parent_id, target = term_id, value = res_n
+          )
+        }
+      } else if (!made_child) {
+        # Would be a 100% terminal; omit if requested
+        if (!omit_full_terminal) {
+          term_uid <- paste0(parent_uid, "|", terminal_label)
+          term_id  <- add_node(term_uid, terminal_label)
+          links[[length(links)+1L]] <<- data.frame(
+            source = parent_id, target = term_id, value = par_n
+          )
+        }
+      }
+    } else if (is_root && show_root_residual_when_no_terminals && length(residual)) {
+      term_uid <- paste0(parent_uid, "|", terminal_label)
+      term_id  <- add_node(term_uid, terminal_label)
+      links[[length(links)+1L]] <<- data.frame(
+        source = parent_id, target = term_id, value = length(residual)
       )
-      pbest <- names(frac)[which.max(frac)]
-      if (max(frac) >= epsilon) parent[child] <- pbest
     }
   }
   
-  # Nodes list
-  nodes <- data.frame(name = c("All cells", mut), stringsAsFactors = FALSE)
-  node_index <- setNames(seq_len(nrow(nodes)) - 1L, nodes$name) # 0-based for d3
+  all_cells <- seq_len(ncol(M))
+  all_vars  <- seq_len(nrow(M))
+  split_node(all_cells, all_vars, parent_uid="All cells", parent_label="All cells", is_root=TRUE)
   
-  # Links: parent -> child with value = #cells in intersection
-  links <- lapply(mut, function(ch) {
-    par <- parent[ch]
-    from <- if (par == "ROOT") "All cells" else par
-    value <- sum(M[ch, ] & if (par == "ROOT") rep(1, ncol(M)) else M[names(par), ])
-    data.frame(source = node_index[from], target = node_index[ch], value = value)
-  }) |> bind_rows()
-  
-  # Optional terminal sinks: child -> "No further mutation (child)"
-  if (add_terminals) {
-    term_links <- lapply(mut, function(ch) {
-      only_ch <- sum(M[ch, ] & !(Reduce("|", lapply(mut[which(parent == ch)], function(cc) M[cc, ]), init = rep(FALSE, ncol(M)))))
-      if (only_ch > 0) {
-        term_name <- paste0(ch, " only")
-        # add node if new
-        if (!(term_name %in% nodes$name)) {
-          nodes <<- bind_rows(nodes, data.frame(name = term_name))
-          node_index <<- setNames(seq_len(nrow(nodes)) - 1L, nodes$name)
-        }
-        data.frame(source = node_index[ch], target = node_index[term_name], value = only_ch)
-      } else NULL
-    })
-    term_links <- bind_rows(term_links[!sapply(term_links, is.null)])
-    if (nrow(term_links)) links <- bind_rows(links, term_links)
-  }
-  
-  list(nodes = nodes, links = links)
+  list(nodes = nodes, links = do.call(rbind, links))
 }
