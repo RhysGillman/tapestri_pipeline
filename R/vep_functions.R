@@ -1,7 +1,7 @@
 #' Run VEP and return either the output path, a data.frame, or a VCF object
-#' @param input path to VCF
+#' @param input Path to VEP input file
 #' @param output desired output path (.vcf recommended)
-#' @param return "path", "data.frame", or "vcf"
+#' @param return Type of object that the function should return, one of "path", "data.frame", or "vcf"
 #' @param args extra VEP CLI args (character vector)
 #' @export
 
@@ -34,6 +34,43 @@ run_vep <- function(input,
          "data.frame" = .parse_vep_vcf(output)
   )
 }
+
+#' Configure VEP
+#' @param mode Execution backend for VEP. One of `"auto"`, `"system"`, `"conda"`, `"singularity"`, `"docker"`, or `"rest"`.
+#'   `"auto"` picks a sensible mode based on what is available; `"system"` calls a local VEP binary;
+#'   `"conda"` activates a conda env containing VEP; `"singularity"`/`"docker"` run VEP in a container;
+#'   `"rest"` uses the Ensembl REST API (local paths like `vep_path`, `cache_dir`, `fasta` are ignored).
+#'   Default: `"auto"`.
+#' @param vep_path Path to the VEP executable or wrapper to call when `mode="system"` (e.g., `/usr/bin/vep`).
+#'   Ignored for container/REST modes.
+#' @param conda_env Name or path of the conda environment that provides VEP when `mode="conda"` (e.g., `"vep-114"` or
+#'   `"/path/to/envs/vep"`). Ignored otherwise.
+#' @param image Container image to use when `mode` is `"singularity"` (e.g., `/path/to/vep.sif`) or `"docker"`
+#'   (e.g., `"ensemblorg/ensembl-vep:release_114.0"`). Ignored for other modes.
+#' @param bind One or more bind-mounts for container modes. For Singularity, a character vector of paths or
+#'   `"host:container"` mappings; for Docker, equivalent `-v host:container` semantics. Use this to expose your
+#'   input/output/cache directories inside the container.
+#' @param cache_dir Directory containing the VEP cache (e.g., `~/.vep`). Used by all local modes; not used by `mode="rest"`.
+#'   Default comes from `Sys.getenv("VEP_CACHE")` or `~/.vep`.
+#' @param fasta Absolute path to the reference FASTA used by VEP (must match `species`/`assembly` and be indexed).
+#'   Optional for `mode="rest"`.
+#' @param species Ensembl species identifier, e.g., `"homo_sapiens"`. Default: `"homo_sapiens"`.
+#' @param assembly Genome assembly/build string, e.g., `"GRCh38"` or `"GRCh37"`. Default: `"GRCh38"`.
+#' @param threads Number of CPU threads to request for VEP. Default: `max(1, parallel::detectCores() - 1L)`.
+#' @param perl_path Optional character vector of directories to prepend to `PATH` before running VEP (helps locate `perl`
+#'   and VEP dependencies in non-standard installs).
+#' @param perl5lib Optional character vector (or single string) to prepend to `PERL5LIB` for locating Perl modules.
+#' @param vep_env Optional named list or named character vector of extra environment variables to set for the VEP run
+#'   (e.g., `c(HTTP_PROXY="http://...", PERL_MM_OPT="...")`).
+#' @param extra_args Character vector of additional raw CLI flags to pass through to VEP (e.g., `c("--everything","--cache")`).
+#' @param perl_bin Absolute path to the Perl interpreter to use (overrides whatever is found on `PATH`). Useful when VEP
+#'   requires a specific Perl. Optional.
+#' @param perl_inc Character vector of include directories to add to Perl's `@INC` (prepended for the VEP process).
+#'   Optional.
+#' @param cache_version Ensembl cache version as a string (e.g., `"114"`). If supplied, may be used to validate or
+#'   construct cache paths/arguments; otherwise inferred by VEP where possible.
+#' @export
+
 
 vep_config <- function(
     mode = c("auto","system","conda","singularity","docker","rest"),

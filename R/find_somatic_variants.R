@@ -1,11 +1,78 @@
 #' find_somatic_variants.R
 #'
-#' This function finds variants enriched in a particular annotated cell-type
+#' Find variants enriched in one or more annotated cell types from a Tapestri
+#' H5 or a multi-sample VCF. Exactly one of `h5_in` or `vcf_in` must be supplied.
+#' Writes summary tables, per-cell genotypes, and (optionally) per-cell-type
+#' enrichment stats to `out_dir` using `file_prefix`.
 #'
-#' @param h5_in Path to input .h5 file
-#' @param out_file Path to output file
-#' @param block Block size (number of rows) for memory-efficient file processing
-#' @return nothing
+#' @param h5_in Path to input MissionBio Tapestri `.h5` file. Provide this OR `vcf_in`.
+#' @param vcf_in Path to input multi-sample VCF (`.vcf.gz`) with `.tbi` index. If a plain `.vcf`
+#'   is provided and `prep_vcf=TRUE`, it will be bgzipped and indexed into `prep_vcf_dir`.
+#' @param prep_vcf Logical; if `TRUE` and `vcf_in` is an uncompressed `.vcf`, create a
+#'   bgzipped and tabix-indexed copy before processing.
+#' @param prep_vcf_dir Directory to write the prepared `*.vcf.gz` and `*.tbi` when
+#'   `prep_vcf=TRUE`. Defaults to the directory of `vcf_in` if `NULL`.
+#' @param cell_type Character vector of cell-type labels to test for variant enrichment. Use `"all"`
+#'   to test every cell type present in `cell_annotations`. Only types present are used.
+#' @param cell_annotations Named vector (length = number of cells) mapping barcode
+#'   (names) → cell-type (values). Barcodes are matched to VCF/H5 samples; common
+#'   prefix/suffix is auto-trimmed if needed.
+#' @param out_dir Output directory for all result files.
+#' @param file_prefix Prefix used to name output files (e.g., `"<prefix>_summary.tsv"`).
+#' @param skip_vep Logical; if `TRUE`, skip VEP annotation and priority variant
+#'   detection. Disables `priority_only` filtering.
+#' @param priority_only Logical; if `TRUE`, restrict downstream outputs to variants
+#'   flagged as priority by VEP (rare protein-impacting). Ignored when `skip_vep=TRUE`.
+#' @param block Integer; number of variants per processing chunk for memory efficiency.
+#'
+#' @param min_DP_per_call Minimum depth (DP) for a per-cell genotype to be considered;
+#'   calls failing are masked (`AF=NA`, `NGT=3`).
+#' @param min_GQ_per_call Minimum genotype quality (GQ) for a per-cell genotype to be
+#'   considered; calls failing are masked (`AF=NA`, `NGT=3`).
+#'
+#' @param min_varcount_total Minimum number of mutant cells (NGT %in% 1,2) across all cells.
+#' @param min_varportion_total Minimum fraction of mutant among informative cells
+#'   (alt_cnt_total / data_cnt_total) required globally.
+#' @param max_varportion_total Maximum allowed global mutant fraction (to exclude
+#'   likely germline/high-frequency sites).
+#' @param min_datacount_total Minimum number of cells with informative data globally.
+#' @param min_dataportion_total Minimum fraction of cells with informative data globally.
+#' @param min_quality_mean_total Minimum mean GQ across cells with AF>0.
+#' @param min_allelefreq_mean_total Minimum mean AF across cells with AF>0.
+#' @param min_allelefreq_mean_mutants Minimum mean AF among mutant cells only
+#'   (NGT %in% 1,2).
+#' @param rare_cutoff MAX_AF threshold used with VEP (e.g., 0.01–0.05). Variants with
+#'   MAX_AF < cutoff or with missing MAX_AF are treated as “rare/unreported” for
+#'   priority calls.
+#'
+#' @param min_varcount_celltype Minimum number of mutant cells within the focal cell type.
+#' @param min_varportion_celltype Minimum mutant fraction within the focal cell type
+#'   (alt_cnt_ct / data_cnt_ct).
+#' @param min_datacount_celltype Minimum number of informative cells within the focal type.
+#' @param min_varportion_in_celltype Minimum fraction of all mutant cells that fall
+#'   inside the focal type (alt_cnt_ct / alt_cnt_total), i.e., enrichment within type.
+#'
+#' @param max_p_value Maximum adjusted p-value (BH) to keep in cell-type enrichment results.
+#' @param odds_ratio_cutoff Minimum odds ratio threshold for enrichment (set negative
+#'   to disable).
+#' @param zscore_cutoff Minimum Wald Z-score threshold for enrichment (set ≤0 to disable).
+#'
+#' @param celltype_sort_value Sorting key for per-cell-type result tables; `"p"`
+#'   sorts by adjusted p-value ascending (default). Other values are currently ignored.
+#'
+#' @param overwrite_variant_summary Logical; overwrite existing global summary files
+#'   (`*_summary.tsv`, `*_summary_pass_only.tsv`, etc.) if present.
+#' @param overwrite_celltype_enrichment Logical; overwrite existing per-cell-type files
+#'   if present.
+#' @param run_cell_type_enrichment Logical; if `TRUE`, compute per-cell-type counts,
+#'   odds ratios, p-values, adjust p-values, and write `"<prefix>_<celltype>.tsv"`
+#'   and filtered variants.
+#'
+#' @param genome_version Genome identifier passed to VariantAnnotation when reading VCF
+#'   (e.g., `"hg19"`, `"GRCh38"`). Must match contigs in the input VCF.
+#' @param threads Number of threads to use where parallelism is available. (Most
+#'   operations here are chunked; heavy parallelism occurs upstream/downstream.)
+#' @return 
 #' @export
 
 find_somatic_variants <- function(h5_in=NULL,
@@ -43,7 +110,6 @@ find_somatic_variants <- function(h5_in=NULL,
                                   zscore_cutoff     = 0,
                                   # Sorting options
                                   celltype_sort_value = "p",
-                                  all_sort_column      = "mean_GQ_total",
                                   overwrite_variant_summary=TRUE,
                                   overwrite_celltype_enrichment=TRUE,
                                   run_cell_type_enrichment=TRUE,
@@ -290,7 +356,7 @@ find_somatic_variants <- function(h5_in=NULL,
           "--force_overwrite",
           "--biotype","--domains",
           "--max_af","--check_existing","--numbers","--regulatory",
-          "--sift","b","--polyphen","b", "--hgvs", "--flag_pick_allele_gene"
+          "--sift","b","--polyphen","b", "--hgvs", "--flag_pick_allele"
         )
       )
     }
@@ -311,8 +377,12 @@ find_somatic_variants <- function(h5_in=NULL,
       dplyr::select(ID, SYMBOL, Gene, Feature, HGVSp, MAX_AF, Consequence, Existing_variation, BIOTYPE, SIFT, PolyPhen) %>%
       # generate a user-friendly plot label
       mutate(plot_ID=ifelse(HGVSp!="" & SYMBOL!="", paste0(SYMBOL,gsub(".*:p.","",HGVSp)), ID) ) %>%
-      mutate(plot_ID=ifelse(plot_ID %in% plot_ID[which(duplicated(plot_ID))], paste0(plot_ID,"(",ID,")"), plot_ID)) %>%
-      group_by(ID) %>%
+      mutate(plot_ID=ifelse(plot_ID %in% plot_ID[which(duplicated(plot_ID))], paste0(plot_ID,"(",str_extract(ID,"([^0-9]+$)", group = 1),")"), plot_ID)) %>%
+      mutate(plot_ID=ifelse(nchar(plot_ID)>30, 
+                            ifelse(str_detect(plot_ID, "\\)$"), paste0(substr(plot_ID,1,30),"...)"), paste0(substr(plot_ID,1,30),"...")),
+                            plot_ID)) %>%
+      mutate(plot_ID=make.unique(plot_ID)) %>%
+      group_by(ID,plot_ID) %>%
       summarise(across(everything(), collapse_terms)) %>%
       # decide on priority variants (rare nonsense/missense/frameshift)
       rowwise() %>%

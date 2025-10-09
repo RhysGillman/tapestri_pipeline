@@ -21,7 +21,9 @@ cluster_variants <- function(
     }
   }
   
-  # Find features
+  #################
+  # Find Features #
+  #################
   
   all_variants <- fread(summary_file) %>%
     mutate(rownumber=row_number()) %>%
@@ -85,7 +87,9 @@ cluster_variants <- function(
   af_matrix <- as.matrix(af_matrix)
   #af_matrix[!is.finite(af_matrix)] <- 0
   
-  # filtering
+  #############
+  # Filtering #
+  #############
   
   min_cells_with_signal <- 5L
   nonzero_counts <- rowSums(af_matrix > 0, na.rm = TRUE)
@@ -94,16 +98,28 @@ cluster_variants <- function(
   af_matrix <- af_matrix[keep, , drop = FALSE]
   if (nrow(af_matrix) == 0) stop("No variants passed filtering for PCA")
   
-  # Add assay to seurat object
+  #################
+  # Seurat Object #
+  #################
   
-  assay_counts <- af_matrix
-  assay_counts[!is.finite(assay_counts)] <- 0
-  assay <- Seurat::CreateAssayObject(counts = assay_counts)
-  assay <- Seurat::SetAssayData(assay, layer = "data", new.data = assay_counts)
-  seurat_obj[["variants"]] <- assay
-  Seurat::DefaultAssay(seurat_obj) <- "variants"
+  if(!is.null(seurat_obj)){
+    # Add assay to seurat object
+    assay_counts <- af_matrix
+    assay_counts[!is.finite(assay_counts)] <- 0
+    assay <- Seurat::CreateAssayObject(counts = assay_counts)
+    assay <- Seurat::SetAssayData(assay, layer = "data", new.data = assay_counts)
+    seurat_obj[["variants"]] <- assay
+    Seurat::DefaultAssay(seurat_obj) <- "variants"
+  }else{
+    assay_counts <- af_matrix
+    assay_counts[!is.finite(assay_counts)] <- 0
+    seurat_obj <- Seurat::CreateSeuratObject(counts = protein_count_matrix, assay = "variants")
+    Seurat::DefaultAssay(obj) <- "variants"
+  }
   
-  
+  ##############
+  # Clustering #
+  ##############
   
   cosine_dist_na <- function(A, min_overlap = 10L) {
     p <- nrow(A); n <- ncol(A)
@@ -127,8 +143,7 @@ cluster_variants <- function(
   }
   
   D <- cosine_dist_na(af_matrix, min_overlap = 10L)
-  
-  # --- UMAP on distance matrix ---------------------------------------------
+
   set.seed(12345)
   umap_emb <- uwot::umap(
     D,

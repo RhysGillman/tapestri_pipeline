@@ -5,6 +5,7 @@
 #' @param seurat_obj Input seurate object
 #' @param resolution Resolution to be used for clustering
 #' @param annotations Named vector of cell types for each cluster
+#' @param plot_directory Location to save final annotations UMAP
 #' @return Seurat object
 #' @export
 

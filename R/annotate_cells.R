@@ -2,7 +2,7 @@
 #'
 #' This function automatically annotates individual cells in a seurat object
 #'
-#' @param input Input seurate object created using prepare_annotation_data()
+#' @param seurat_obj Input seurate object created using prepare_annotation_data()
 #' @param markers Either "CellMarker2.0" (default) or named list of markers for cell types
 #' @param plot_directory Output directory to save plots
 #' @param CellMarker_path Path to CellMarker2.0 
@@ -14,7 +14,7 @@
 
 
 annotate_cells <- function(
-    input=NULL,
+    seurat_obj=NULL,
     markers="CellMarker2.0",
     plot_directory=NULL,
     CellMarker_path=NULL,
@@ -28,7 +28,7 @@ annotate_cells <- function(
     dir.create(plot_directory, recursive = T)
   }
   
-  sample_ID=input@meta.data$sample_ID[1]
+  sample_ID=seurat_obj@meta.data$sample_ID[1]
   
   ########################
   # Prepare Cell Markers #
@@ -39,7 +39,7 @@ annotate_cells <- function(
   if(is.list(markers)){
     cell_markers <- markers
     # only keep markers present in seurat object
-    cell_markers <- lapply(cell_markers, function(v) v[v %in% Features(input)])
+    cell_markers <- lapply(cell_markers, function(v) v[v %in% Features(seurat_obj)])
   }
   else if(markers=="CellMarker2.0"){
     # Read in and filter CellMarker data
@@ -54,7 +54,7 @@ annotate_cells <- function(
     }
     # only keep markers present in seurat object
     cell_markers <- cell_markers %>%
-      filter(markers %in% Features(input))
+      filter(markers %in% Features(seurat_obj))
     
     # create SCINA cell_markers list
     cell_markers <- split(cell_markers, cell_markers$cell_name) %>% lapply(deframe)
@@ -65,7 +65,7 @@ annotate_cells <- function(
   # Run SCINA #
   #############
   
-  normalised_mat <- GetAssayData(input, assay = "ADT", layer = "data")
+  normalised_mat <- GetAssayData(seurat_obj, assay = "ADT", layer = "data")
   
   message("Running SCINA...")
   
@@ -109,12 +109,12 @@ annotate_cells <- function(
   #################################
   message(paste0("Generating ",file.path(plot_directory,paste0(sample_ID,"_SCINA_cell_annotations_UMAP.png"))))
   # add SCINA annotations to seurat object
-  common <- intersect(colnames(input), names(final_annotations))
-  input$SCINA_label <- NA
-  input$SCINA_label[common] <- final_annotations[common]
+  common <- intersect(colnames(seurat_obj), names(final_annotations))
+  seurat_obj$SCINA_label <- NA
+  seurat_obj$SCINA_label[common] <- final_annotations[common]
   
   DimPlot(
-    input,
+    seurat_obj,
     reduction = "umap",
     group.by  = "SCINA_label",
     label     = FALSE,
@@ -124,7 +124,7 @@ annotate_cells <- function(
   
   ggsave(file.path(plot_directory,paste0(sample_ID,"_SCINA_cell_annotations_UMAP.png")))
   
-  resolutions <- colnames(input@meta.data)[str_detect(colnames(input@meta.data),"ADT_snn_res")] %>%
+  resolutions <- colnames(seurat_obj@meta.data)[str_detect(colnames(seurat_obj@meta.data),"ADT_snn_res")] %>%
     gsub(pattern="ADT_snn_res.",replacement="")
   
   ############################################
@@ -138,7 +138,7 @@ annotate_cells <- function(
     message(paste0("Generating ",file.path(plot_directory,paste0(sample_ID,"_seurat_clusters_res_",res,".png"))))
     
     # seurat clusters
-    DimPlot(input,
+    DimPlot(seurat_obj,
             reduction = "umap",
             group.by  = res_col,
             label     = TRUE,
@@ -151,8 +151,8 @@ annotate_cells <- function(
     
     # heatmap marker expression
     DoHeatmap(
-      input,
-      features = Features(input),
+      seurat_obj,
+      features = Features(seurat_obj),
       group.by = res_col,
       raster   = TRUE,
       slot     = "data"
@@ -161,8 +161,8 @@ annotate_cells <- function(
     ggsave(file.path(plot_directory,paste0(sample_ID,"_marker_expression_heatmap_res_",res,".png")))
     
     
-    clust_vec <- input@meta.data[[res_col]]
-    scina_vec <- input$SCINA_label
+    clust_vec <- seurat_obj@meta.data[[res_col]]
+    scina_vec <- seurat_obj$SCINA_label
     valid <- !is.na(clust_vec) & !is.na(scina_vec)
     
     # proportions of cell annotation per cluster
@@ -183,7 +183,7 @@ annotate_cells <- function(
     )
     
     # Build a data frame with coords + labels
-    df <- Embeddings(input, "umap")[valid, 1:2] |>
+    df <- Embeddings(seurat_obj, "umap")[valid, 1:2] |>
       as.data.frame() |>
       `colnames<-`(c("UMAP_1","UMAP_2"))
     df$cluster     <- clust_vec[valid]
@@ -228,7 +228,7 @@ annotate_cells <- function(
     
   }
   
-  return(input)
+  return(seurat_obj)
   
   
 }

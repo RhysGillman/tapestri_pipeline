@@ -4,11 +4,14 @@
 #'
 #' @param input_file Path to input .dna+protein.h5 file
 #' @param sample_ID Sample ID, or NULL to derive from .h5 filname (default)
-#' @param res Vector of resolutions to to be used my FindClusters
+#' @param cluster_resolutions Numeric vector of resolutions for Seurat::FindClusters (default: c(0.2, 0.35, 0.5, 0.8, 1, 1.2))
 #' @param save_directory Output directory to save seurat object as .RDS, or NULL to prevent saving (default)
+#' @param qc_plot_directory Directory to save QC plots to
+#' @param variance_quantile Threshold for selecting the top quantile of ADT markers based on their variance
+#' @param neighbor_metric Distance metric to be used for cell clustering by Seurat::RunUMAP and Seurat::FindNeighbors (eg. euclidean (default), cosine, correlation)
+#' @param k_param k.param for Seurat::FindNeighbors, also used for n.neighbors in Seurat::RunUMAP
 #' @return Seurat object
 #' @export
-
 
 prepare_annotation_data <- function(
   input_file=NULL,
@@ -16,7 +19,7 @@ prepare_annotation_data <- function(
   cluster_resolutions=c(0.2, 0.35, 0.5, 0.8, 1, 1.2),
   save_directory=NULL,
   qc_plot_directory=NULL,
-  variance_quantile=0.25, # top quantile (0-1) of variance to use for UMAP
+  variance_quantile=0.25,
   neighbor_metric="euclidean",
   k_param=50
 ){
@@ -44,10 +47,8 @@ prepare_annotation_data <- function(
   # CLR-normalize across cells
   obj <- NormalizeData(obj, normalization.method = "CLR", margin = 2)
   
-  
-  # Drop any zero-variance or non-finite features
+  # Variance filtering
   norm_mat <- GetAssayData(obj, assay = "ADT", layer = "data")
-  
   vars <- matrixStats::rowVars(as.matrix(norm_mat))
   thresh <- quantile(vars, variance_quantile)
   
@@ -56,7 +57,6 @@ prepare_annotation_data <- function(
     message(paste0("Warning: The following features are being removed due to having low variance or non-finite values\n",paste(names(which(keep==F)),collapse = "\n")))
     obj <- subset(obj, features = names(keep)[keep])
   }
-  
   
   # scaled data
   obj <- ScaleData(obj, assay = "ADT", layer = "data")  # writes layer "scale.data"
