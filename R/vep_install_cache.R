@@ -38,7 +38,7 @@ vep_install_cache <- function(species = .get_cfg()$species,
       "-a", auto,
       "-s", species,
       "-y", assembly,
-      "--NO_UPDATE", "--CONVERT", "--QUIET"
+      "--NO_UPDATE", "--CONVERT"#, "--QUIET"
     )
     if (!is.null(cache_version)) args <- c(args, "--CACHE_VERSION", as.character(cache_version))
     
@@ -64,7 +64,7 @@ vep_install_cache <- function(species = .get_cfg()$species,
       "-a", auto,
       "-s", species,
       "-y", assembly,
-      "--NO_UPDATE", "--CONVERT", "--QUIET"
+      "--NO_UPDATE", "--CONVERT"#, "--QUIET"
     )
     if (!is.null(cache_version)) args <- c(args, "--CACHE_VERSION", as.character(cache_version))
     

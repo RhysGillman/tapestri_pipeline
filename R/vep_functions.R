@@ -224,16 +224,20 @@ vep_config <- function(
 }
 
 # tiny helper that checks exit codes and prints stderr on failure
-.run_system <- function(bin, args){
+.run_system <- function(bin, args, stream=T){
+  
+  out_opt <- if (stream) "" else TRUE
+  
   cfg <- getOption("myvep.config")
   env <- .build_vep_env(cfg)
   
   # 1) Try direct exec of vep
   out1 <- try(system2(bin, args, env = if(length(env)) env else NULL,
-                      stdout = TRUE, stderr = TRUE), silent = TRUE)
+                      stdout = out_opt, stderr = out_opt), silent = TRUE)
   if (!inherits(out1, "try-error")) {
-    attr(out1, "status") <- attr(out1, "status") %||% 0L
-    if (identical(attr(out1, "status"), 0L)) return(out1)
+    status <- suppressWarnings(attr(out1, "status"))
+    if (is.null(status)) status <- if (is.numeric(out1) && length(out1) == 1L) as.integer(out1) else 0L
+    if (identical(status, 0L)) return(out1)
   }
   
   # 2) Fallback: run via explicit perl with include dirs (-I)
@@ -241,10 +245,11 @@ vep_config <- function(
   inc_flags <- if (length(cfg$perl_inc)) sprintf("-I%s", cfg$perl_inc) else character()
   out2 <- try(system2(perl, c(inc_flags, bin, args),
                       env = if(length(env)) env else NULL,
-                      stdout = TRUE, stderr = TRUE), silent = TRUE)
+                      stdout = out_opt, stderr = out_opt), silent = TRUE)
   if (!inherits(out2, "try-error")) {
-    attr(out2, "status") <- attr(out2, "status") %||% 0L
-    if (identical(attr(out2, "status"), 0L)) return(out2)
+    status <- suppressWarnings(attr(out2, "status"))
+    if (is.null(status)) status <- if (is.numeric(out2) && length(out2) == 1L) as.integer(out2) else 0L
+    if (identical(status, 0L)) return(out2)
   }
   
   # 3) Fallback: run via explicit perl relying on PERL5LIB
@@ -254,11 +259,12 @@ vep_config <- function(
   }
   out3 <- try(system2(perl, c(bin, args),
                       env = if(length(env3)) env3 else NULL,
-                      stdout = TRUE, stderr = TRUE), silent = TRUE)
+                      stdout = out_opt, stderr = out_opt), silent = TRUE)
   
   if (!inherits(out3, "try-error")) {
-    attr(out3, "status") <- attr(out3, "status") %||% 0L
-    if (identical(attr(out3, "status"), 0L)) return(out3)
+    status <- suppressWarnings(attr(out3, "status"))
+    if (is.null(status)) status <- if (is.numeric(out3) && length(out3) == 1L) as.integer(out3) else 0L
+    if (identical(status, 0L)) return(out3)
   }
   
   stop("VEP failed via direct exec and perl fallbacks.\n--- Last output ---\n",
