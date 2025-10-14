@@ -21,7 +21,7 @@ annotate_clusters <- function(seurat_obj=NULL, resolution=NULL, annotations=NULL
   # map clusters -> labels
   lab <- annotations[as.character(Idents(seurat_obj))]
   lab[is.na(lab)] <- "Unknown"              # optional default
-  names(lab) <- colnames(seurat_obj)        # <<< key line
+  names(lab) <- colnames(seurat_obj)
   
   seurat_obj$final_annotation <- lab
   Idents(seurat_obj) <- "final_annotation"

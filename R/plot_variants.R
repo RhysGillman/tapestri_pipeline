@@ -12,6 +12,8 @@
 #' @param file_prefix Prefix used by `find_somatic_variants()`.
 #'   Used to locate `*_summary_pass*.tsv`, `*_genotypes.tsv`, and
 #'   `*_variant_counts_per_celltype.tsv` inside `result_dir`.
+#' @param input_files Optional vector of file paths if not searching with file_prefix. Must include `*_summary_pass*.tsv`, `*_genotypes.tsv`, and
+#'   `*_variant_counts_per_celltype.tsv`files.
 #' @param search Optional character vector of search terms/regex to select
 #'   variants of interest from the summary table. If `NULL`, the top `n_variants`
 #'   are chosen by `topn_col` after filtering.
@@ -36,8 +38,8 @@
 #'   cells) required for a variant to be plotted.
 #' @param max_alt_portion_total Maximum allowed global mutant fraction
 #'   (`alt_cnt_total / data_cnt_total`) to keep (helps exclude ubiquitous/germline-like sites).
-#' @param topn_col Column used to rank variants when `search` is `NULL`.
-#'   Use `"padj"` (ascending) or `"OR"`/`"Z_score"` (descending).
+#' @param topn_col Column used to rank variants. If NULL (default) the row order of the cell-type
+#'   results files is used. Use `"p"` (ascending) or `"OR"`/`"Z_score"` (descending).
 #' @param font_size_multiplyer Global multiplier for text sizes in UMAP panels;
 #'   useful when plotting many variants in grids.
 #'
@@ -47,7 +49,9 @@
 
 plot_variants <- function(
     seurat_obj=NULL,
-    file_prefix,
+    cell_annotations=NULL,
+    file_prefix=NULL,
+    input_files=NULL,
     search=NULL,
     n_variants=20,
     search_col="plot_ID",
@@ -61,44 +65,69 @@ plot_variants <- function(
     z_min=2,
     min_varcount_total  = 20,
     max_alt_portion_total = 0.5,
-    topn_col="padj",
-    font_size_multiplyer=1
+    topn_col=NULL,
+    font_size_multiplyer=1,
+    umap_reduction="umap"
 ){
-  #########
-  # Files #
-  #########
-  
-  variant_counts_file <- file.path(result_dir,paste0(file_prefix,"_variant_counts_per_celltype.tsv"))
-  variant_counts_cols <- colnames(data.table::fread(variant_counts_file, nrows = 2L, sep = "\t"))
-  genotype_file <- file.path(result_dir,paste0(file_prefix,"_genotypes.tsv"))
-  genotype_fmt_line <- readLines(genotype_file, n = 1L)
-  genotype_format_fields <- strsplit(gsub("^#FORMAT=", "", genotype_fmt_line), ";", fixed = TRUE)[[1]]
-  
-  .is_mutated = function(s) {
+  .is_mutated <- function(s) {
     components <- unlist(str_split(s, ";"))
     NGT <- components[which(genotype_format_fields=="NGT")]
     return(suppressWarnings(as.numeric(NGT)) %in% c(1,2))
   }
+  .pull_AF <- function(s){
+    components <- unlist(str_split(s, ";"))
+    AF <- components[which(genotype_format_fields=="AF")]
+    return(AF)
+  }
   
-  genotype_cols <- colnames(data.table::fread(genotype_file, nrows = 2L, sep = "\t"))
   
-  all_files <- list.files(
-    path = result_dir
-  )
+  if(is.null(seurat_obj) & is.null(cell_annotations)){
+    message("Need either seurat_obj or cell_annotations for heatmap. This will be skipped")
+  }else{
+    if(is.null(cell_annotations)){
+      cell_annotations <- Idents(seurat_obj)
+    }
+  }
   
-  cell_type_files <- grep(paste0("^",file_prefix,"_(?!summary|vep_in|genotypes|variant_counts_per_celltype).*.tsv"), all_files, value = TRUE, perl = TRUE)
+  #########
+  # Files #
+  #########
+  
+  if(!is.null(input_files)){
+    all_files <- input_files
+  }else{
+    all_files <- list.files(result_dir, pattern = file_prefix)
+  }
+  
+  variant_counts_file <- all_files[grep("_variant_counts_per_celltype.tsv", all_files)]
+  genotype_file <- all_files[grep("_genotypes.tsv", all_files)]
+  
+  if(length(variant_counts_file) > 1 | length(genotype_file) > 1){
+    stop("Multiple variant count or genotype files detected. Try using input_files instead of file_prefix")
+  }
+  
+  variant_counts_cols <- .get_col_schema(file.path(result_dir,variant_counts_file), 1000)
+  genotype_fmt_line <- readLines(file.path(result_dir,genotype_file), n = 1L)
+  genotype_format_fields <- strsplit(gsub("^#FORMAT=", "", genotype_fmt_line), ";", fixed = TRUE)[[1]]
+  genotype_cols <- .get_col_schema(file.path(result_dir,genotype_file), 1000)
+  
+  cell_type_files <- all_files[!grepl("summary|vep|genotypes|variant_counts_per_celltype",all_files)]
+  cell_type_files <- cell_type_files[grep(".tsv$",cell_type_files)]
   
   if(priority_only){
-    summary_file <- file.path(result_dir,paste0(file_prefix,"_summary_pass_only_priority.tsv"))
-    cell_type_files <- cell_type_files[str_detect(cell_type_files, "pass_only_priority.tsv$")]
+    summary_file <- all_files[grep("_summary_pass_only_priority.tsv", all_files)]
+    cell_type_files <- cell_type_files[grep("pass_only_priority.tsv", cell_type_files)]
   }else{
-    summary_file <- file.path(result_dir,paste0(file_prefix,"_summary_pass_only.tsv"))
-    cell_type_files <- cell_type_files[str_detect(cell_type_files, "pass_only.tsv$")]
+    summary_file <- all_files[grep("_summary_pass_only.tsv", all_files)]
+    cell_type_files <- cell_type_files[grep("pass_only.tsv$", cell_type_files)]
   }
-  summary_cols <- colnames(data.table::fread(summary_file, nrows = 2L, sep = "\t"))
+  
+  summary_cols <- .get_col_schema(file.path(result_dir,summary_file), 1000)
+  
+  cell_type_cols <- .get_col_schema(file.path(result_dir,cell_type_files[1]),1000)
   
   cell_types <- unique(str_extract(cell_type_files, pattern = paste0("^",file_prefix,"_(.*)_pass.*.tsv"), group = 1))
-  barcodes <- .detect_barcodes(genotype_file)
+  barcodes <- .detect_barcodes(file.path(result_dir,genotype_file))
   
   ########################
   # Variants of Interest #
@@ -109,7 +138,7 @@ plot_variants <- function(
   if(is.null(search)){
     variant_rows <- foreach(file=file.path(result_dir,cell_type_files), .combine = "bind_rows") %do%{
       c <- str_extract(file, pattern = paste0(file_prefix,"_(.*)_pass.*.tsv"), group = 1)
-      v <- fread(file) %>%
+      v <- fread(file, col.names  = names(cell_type_cols), colClasses = cell_type_cols) %>%
         mutate(cell_type=c)
       if (!is.null(p_max)) v <- filter(v, padj < p_max)
       if (!is.null(z_min)) v <- filter(v, Z_score > z_min)
@@ -117,20 +146,23 @@ plot_variants <- function(
       v
     }
   
-    if(topn_col %in% c("OR","Z_score")){
-      variant_rows <- variant_rows %>%
-        arrange(desc(!!sym(topn_col))) %>%
-        head(n_variants)
-    }else if(topn_col %in% c("padj")){
-      variant_rows <- variant_rows %>%
-        arrange(!!sym(topn_col)) %>%
-        head(n_variants)
-    }
-    
     variant_rows <- variant_rows %>%
       # apply filters
       filter(alt_cnt_total >= min_varcount_total) %>%
       filter(alt_proportion_total <= max_alt_portion_total)
+    
+    if(is.null(topn_col)){
+      variant_rows <- variant_rows %>%
+        head(n_variants)
+    }else if(topn_col %in% c("OR","Z_score")){
+      variant_rows <- variant_rows %>%
+        arrange(desc(abs(!!sym(topn_col)))) %>%
+        head(n_variants)
+    }else if(topn_col %in% c("p")){
+      variant_rows <- variant_rows %>%
+        arrange(padj,p,abs(Z_score)) %>%
+        head(n_variants)
+    }
     
     
     variants <- variant_rows %>% dplyr::select(variant,plot_ID) %>% unique() %>% deframe()
@@ -139,14 +171,14 @@ plot_variants <- function(
     
     # Let user search for variants by defining a search term and a column #
     
-    if(!search_col %in% summary_cols){
+    if(!search_col %in% names(summary_cols)){
       stop("search_col not found in variant data")
     }
     
     message("Searching for variants:")
     variant_rows <- foreach(s=search, .combine = "bind_rows") %do% {
       message(s)
-      fread(summary_file) %>%
+      fread(file.path(result_dir,summary_file), col.names  = names(summary_cols), colClasses = summary_cols) %>%
         as.data.frame() %>%
         filter(str_detect(.data[[search_col]], regex(s)))
     }
@@ -170,7 +202,7 @@ plot_variants <- function(
     if (!is.null(p_max) || !is.null(z_min)) {
       all_results <- foreach(file=file.path(result_dir,cell_type_files), .combine = "bind_rows") %do%{
         c <- str_extract(file, pattern = paste0(file_prefix,"_(.*)_pass.*.tsv"), group = 1)
-        fread(file) %>%
+        fread(file, col.names  = names(cell_type_cols), colClasses = cell_type_cols) %>%
           mutate(cell_type=c)
       }
       
@@ -186,6 +218,20 @@ plot_variants <- function(
     if(nrow(variant_rows)==0){
       stop("ERROR: Search and filters returned no variants")
     }
+    
+    if(is.null(topn_col)){
+      variant_rows <- variant_rows %>%
+        head(n_variants)
+    }else if(topn_col %in% c("OR","Z_score")){
+      variant_rows <- variant_rows %>%
+        arrange(desc(abs(!!sym(topn_col)))) %>%
+        head(n_variants)
+    }else if(topn_col %in% c("p")){
+      variant_rows <- variant_rows %>%
+        arrange(padj,p,abs(Z_score)) %>%
+        head(n_variants)
+    }
+    
     
     variants <- variant_rows %>% dplyr::select(variant,plot_ID) %>% unique() %>% deframe()
     
@@ -204,13 +250,12 @@ plot_variants <- function(
   
   variant_counts <- foreach(variant=variants, .combine = "bind_rows") %do% {
     suppressWarnings(variant_row <- data.table::fread(
-      cmd = sprintf("grep -Fw '%s' '%s'", variant, variant_counts_file),
-      sep = "\t"
+      cmd = sprintf("grep -Fw '%s' '%s'", variant, file.path(result_dir,variant_counts_file)),
+      sep = "\t",
+      #header=F,
+      col.names  = names(variant_counts_cols), colClasses = unname(variant_counts_cols)
     ) %>% 
-      as.data.frame() %>%
-      setNames(variant_counts_cols) %>%
-      mutate(chromosome=as.character(chromosome),
-             MAX_AF=as.double(MAX_AF)))
+      as.data.frame())
   } %>%
     # deal with special case duplicate plot_IDs
     #mutate(plot_ID=ifelse(plot_ID %in% plot_ID[which(duplicated(plot_ID))], paste0(plot_ID,"(",variant,")"), plot_ID)) %>%
@@ -248,11 +293,11 @@ plot_variants <- function(
     
     upset_data <- foreach(v=names(variants)) %do% {
       variant_row <- data.table::fread(
-        cmd = sprintf("grep -Fw '%s' '%s'", v, genotype_file),
-        sep = "\t"
+        cmd = sprintf("grep -Fw '%s' '%s'", v, file.path(result_dir,genotype_file)),
+        sep = "\t",
+        col.names  = names(genotype_cols), colClasses = unname(genotype_cols)
       ) %>% 
         as.data.frame() %>%
-        setNames(genotype_cols) %>%
         filter(variant==v)
       variant_row <- variant_row[barcodes]
       mutated <- vapply(variant_row, .is_mutated, logical(1))
@@ -297,6 +342,87 @@ plot_variants <- function(
   }
     
   ##############
+  # AF Heatmap #
+  ##############
+  
+  
+  HM_data <- foreach(v=names(variants), .combine = "bind_rows") %do% {
+    variant_row <- data.table::fread(
+      cmd = sprintf("grep -Fw '%s' '%s'", v, file.path(result_dir,genotype_file)),
+      sep = "\t",
+      col.names  = names(genotype_cols), colClasses = unname(genotype_cols)
+    ) %>% 
+      as.data.frame() %>%
+      filter(variant==v)
+    variant_row <- as.matrix(variant_row[barcodes])
+    AF <- apply(variant_row, 2, .pull_AF) %>% as.numeric()
+    as.data.frame(matrix(AF, nrow = 1))
+  }
+  dimnames(HM_data) <- list(variants, barcodes)
+  
+  HM_data <- t(HM_data) %>% as.data.frame()
+  
+  HM_cell_order <- as.data.frame(cell_annotations)
+  colnames(HM_cell_order) <- "cell_type"
+  
+  # get within-cell-type clusters
+  new_order <- integer(0)
+  for (ct in unique(cell_annotations)) {
+    idx <- which(HM_cell_order$cell_type == ct)
+    if (length(idx) > 2 && ncol(HM_data) > 1) {
+      subHM_data <- HM_data[idx, , drop = FALSE]
+      subHM_data <- as.matrix(subHM_data)
+      ok_row <- rowSums(is.finite(subHM_data)) >= 2
+      
+      col_full <- if (any(ok_row)) colSums(is.finite(subHM_data[ok_row, , drop = FALSE])) == sum(ok_row) else rep(FALSE, ncol(subHM_data))
+      M <- subHM_data[ok_row, col_full, drop = FALSE]
+      
+      if (sum(ok_row) >= 2 && ncol(M) >= 1) {
+        ord_good <- hclust(dist(M))$order
+        ord_idx  <- c(which(ok_row)[ord_good], which(!ok_row))  # sparse/all-NA rows at end
+      } else {
+        ord_idx <- seq_len(nrow(subHM_data))  # not enough data to cluster
+      }
+      
+      ord <- idx[ord_idx]
+      
+    } else {
+      ord <- idx
+    }
+    new_order <- c(new_order, ord)
+  }
+  
+  HM_data <- HM_data[new_order, , drop = FALSE]
+  HM_cell_order <- HM_cell_order[new_order, , drop = FALSE]
+  
+  gaps <- cumsum(table(HM_cell_order$cell_type))
+  gaps <- gaps[seq_len(length(gaps)-1)]
+  
+  
+  palette <- colorRampPalette(c("#6baed6","#EDE953","#E03512"))(101)
+ 
+  brks <- seq(0, 1, length.out = length(palette) + 1)
+  
+  p <- pheatmap(HM_data,
+           color = palette,
+           breaks = brks,
+           na_col = "darkgrey",
+           cluster_rows = FALSE,
+           cluster_cols = FALSE,
+           annotation_row = HM_cell_order,
+           gaps_row =  gaps,
+           scale = "none",
+           show_rownames = F,
+           show_colnames = T,
+           main = "Allele frequency heatmap",
+           legend = TRUE,
+           legend_breaks = c(0,0.25,0.5,0.75,1),
+           legend_labels = c("0","0.25","0.5","0.75","1"),
+           filename = file.path(plot_directory,paste0(plot_prefix,"_AF_heatmap.png")))
+  
+  message(paste0("Saved allele frequency heatmap to ", file.path(plot_directory,paste0(plot_prefix,"_AF_heatmap.png"))))
+  
+  ##############
   # UMAP Plots #
   ##############
   
@@ -320,11 +446,11 @@ plot_variants <- function(
     umap_plots <- foreach(v=names(variants)) %do% {
       
       seurat_anno_data <- data.table::fread(
-        cmd = sprintf("grep -Fw '%s' '%s'", v, genotype_file),
-        sep = "\t"
+        cmd = sprintf("grep -Fw '%s' '%s'", v, file.path(result_dir,genotype_file)),
+        sep = "\t",
+        col.names  = names(genotype_cols), colClasses = unname(genotype_cols)
       ) %>% 
         as.data.frame() %>%
-        setNames(genotype_cols) %>%
         filter(variant==v)
       seurat_anno_data <- seurat_anno_data[c("plot_ID",barcodes)] %>%
         column_to_rownames("plot_ID") %>%
@@ -374,12 +500,12 @@ plot_variants <- function(
             labels = c("Unavailable","WT","HET","HOM")
           )
           p <- DimPlot(
-            seurat_obj, reduction = "umap", group.by = feature,
+            seurat_obj, reduction = umap_reduction, group.by = feature,
             pt.size   = 1, alpha = 0.9
           ) + ggplot2::ggtitle(paste0(v)) +
             scale_color_manual(
               name   = "NGT",
-              values = c(WT="lightblue", HET="darkgreen", HOM="red", Unavailable="grey80"),
+              values = c(WT="#6baed6", HET="#EDE953", HOM="#E03512", Unavailable="darkgrey"),
               limits = c("WT","HET","HOM","Unavailable"),
               drop   = FALSE
             ) +
@@ -397,10 +523,14 @@ plot_variants <- function(
           }
           
         }else{
-          p <- suppressMessages(FeaturePlot(seurat_obj, features = feature, reduction = "umap", order = TRUE, pt.size = 1, ) +
+          p <- suppressMessages(FeaturePlot(seurat_obj, features = feature, reduction = umap_reduction, order = TRUE, pt.size = 1, ) +
             ggplot2::ggtitle(paste0(type,": ", v)) +
-            scale_colour_gradient("AF", limits = c(0,1), breaks = c(0,0.5,1), low = "grey85", high = "red",
-                                   oob = scales::squish, na.value = "grey85") +
+            scale_colour_gradient2("AF", 
+                                   limits = c(0,1), 
+                                   breaks = c(0,0.5,1), 
+                                   low = "#6baed6", mid= "#EDE953",high = "#E03512",
+                                   midpoint = 0.5,
+                                   oob = scales::squish, na.value = "darkgrey") +
             theme(plot.title = element_text(size = umap_plot_title_size),
                   legend.title = element_text(size = umap_legend_title_size),
                   legend.text = element_text(size=umap_legend_label_size),
@@ -422,8 +552,8 @@ plot_variants <- function(
     names(umap_plots) <- variants
     
     annotated_umap <- DimPlot(seurat_obj,
-                              reduction = "umap",
-                              group.by  = "final_annotation",
+                              reduction = umap_reduction,
+                              #group.by  = "final_annotation",
                               label     = TRUE,
                               repel     = TRUE, label.box = T, pt.size=1.5, label.size = umap_ref_label_size
     ) +
@@ -449,11 +579,11 @@ plot_variants <- function(
   
   mut_matrix <- foreach(v=names(variants), .combine="bind_rows") %do% {
     variant_row <- data.table::fread(
-      cmd = sprintf("grep -Fw '%s' '%s'", v, genotype_file),
-      sep = "\t"
+      cmd = sprintf("grep -Fw '%s' '%s'", v, file.path(result_dir,genotype_file)),
+      sep = "\t",
+      col.names  = names(genotype_cols), colClasses = unname(genotype_cols)
     ) %>% 
       as.data.frame() %>%
-      setNames(genotype_cols) %>%
       filter(variant==v)
     variant_row <- variant_row[barcodes]
     vapply(variant_row, .is_mutated, logical(1))
