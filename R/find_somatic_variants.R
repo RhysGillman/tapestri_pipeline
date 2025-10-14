@@ -58,7 +58,7 @@
 #' @param zscore_cutoff Minimum Wald Z-score threshold for enrichment (set ≤0 to disable).
 #'
 #' @param celltype_sort_value Sorting key for per-cell-type result tables; `"p"`
-#'   sorts by adjusted p-value ascending (default). Other values are currently ignored.
+#'   sorts by adjusted p-value ascending (default). `"z"` sorts by descending z-score.
 #'
 #' @param overwrite_variant_summary Logical; overwrite existing global summary files
 #'   (`*_summary.tsv`, `*_summary_pass_only.tsv`, etc.) if present.
@@ -263,7 +263,7 @@ find_somatic_variants <- function(h5_in=NULL,
       stop("vcf index required, use prep_vcf=TRUE")
     }
     
-    tabix <- TabixFile(vcf_in)#, yieldSize = block*100)
+    tabix <- TabixFile(vcf_in, yieldSize = block*100)
     
     param <- ScanVcfParam(
       fixed = c("ALT"),
@@ -287,11 +287,12 @@ find_somatic_variants <- function(h5_in=NULL,
       CHROM  <- as.character(seqnames(rr))
       POS    <- start(rr)
       REF    <- as.character(ref(vcf))
-      ALT <- vapply(
-        as.list(alt(vcf)),
-        function(x) paste(as.character(x), collapse = ","),
-        character(1)
-      )
+      ALT    <- as.character(alt(vcf))
+      #ALT <- vapply(
+      #  as.list(alt(vcf)),
+      #  function(x) paste(as.character(x), collapse = ","),
+      #  character(1)
+      #)
       
       if(exists("variant_info")){
         variant_info <- variant_info %>%
@@ -608,7 +609,35 @@ find_somatic_variants <- function(h5_in=NULL,
           ct_stats <- .calculate_cell_type_stats(NGTb,ct,cell_annotations,var_stats)
           
           stats_block_ct <- block_summary %>%
-            bind_cols(ct_stats) 
+            bind_cols(ct_stats) %>%
+            # filtering
+            rowwise() %>%
+            mutate(
+              # Build the new, cell-type-specific filter labels
+              .new_filter_labels = {
+                labs <- c(
+                  "varcount_celltype"       = alt_cnt_ct  < min_varcount_celltype,
+                  "varportion_celltype"     = alt_proportion_ct  < min_varportion_celltype,
+                  "datacount_celltype"      = data_cnt_ct   < min_datacount_celltype,
+                  "varportion_in_celltype"  = alt_proportion_in_ct < min_varportion_in_celltype
+                )
+                out <- paste(names(which(labs)), collapse = ";")
+                if (out == "") "." else out
+              },
+              # Append to existing `filter` (which may be "." from your previous step)
+              filter = {
+                add <- .new_filter_labels
+                if (add == ".") {
+                  filter
+                } else if (filter == ".") {
+                  add
+                } else {
+                  paste0(filter, ";", add)
+                }
+              }
+            ) %>%
+            dplyr::select(-.new_filter_labels) %>%
+            ungroup()
           
           write_tsv(stats_block_ct, ct_file, append = TRUE, col_names = first_block)
           
@@ -770,7 +799,35 @@ find_somatic_variants <- function(h5_in=NULL,
           ct_stats <- .calculate_cell_type_stats(NGTb,ct,cell_annotations,var_stats)
           
           stats_block_ct <- block_summary %>%
-            bind_cols(ct_stats) 
+            bind_cols(ct_stats) %>%
+            # filtering
+            rowwise() %>%
+            mutate(
+              # Build the new, cell-type-specific filter labels
+              .new_filter_labels = {
+                labs <- c(
+                  "varcount_celltype"       = alt_cnt_ct  < min_varcount_celltype,
+                  "varportion_celltype"     = alt_proportion_ct  < min_varportion_celltype,
+                  "datacount_celltype"      = data_cnt_ct   < min_datacount_celltype,
+                  "varportion_in_celltype"  = alt_proportion_in_ct < min_varportion_in_celltype
+                )
+                out <- paste(names(which(labs)), collapse = ";")
+                if (out == "") "." else out
+              },
+              # Append to existing `filter` (which may be "." from your previous step)
+              filter = {
+                add <- .new_filter_labels
+                if (add == ".") {
+                  filter
+                } else if (filter == ".") {
+                  add
+                } else {
+                  paste0(filter, ";", add)
+                }
+              }
+            ) %>%
+            dplyr::select(-.new_filter_labels) %>%
+            ungroup()
           
           write_tsv(stats_block_ct, ct_file, append = TRUE, col_names = first_block)
           
@@ -806,19 +863,25 @@ find_somatic_variants <- function(h5_in=NULL,
       # stores cell type-specific stats for passing priority variants
       ct_pass_priority_file <- file.path(out_dir,paste0(file_prefix,"_",ct,"_pass_only_priority.tsv"))
       
-      full_results <- fread(ct_file) %>%
-        #adjust p-values
-        adjust_pvalue(p.col="p",output.col = "padj",method = "BH") %>%
+      
+      full_results <- fread(ct_file)
+      
+      tested_idx <- with(full_results, filter == "." & is.finite(p))
+      
+      # adjust p-values only on passing variants
+      full_results[, padj := NA_real_]
+      if (any(tested_idx)) {
+        full_results$padj[tested_idx] <- p.adjust(full_results$p[tested_idx], method = "BH")
+      }
+      
+      
+      full_results <- full_results %>%
         # filtering
         rowwise() %>%
         mutate(
           # Build the new, cell-type-specific filter labels
           .new_filter_labels = {
             labs <- c(
-              "varcount_celltype"       = alt_cnt_ct  < min_varcount_celltype,
-              "varportion_celltype"     = alt_proportion_ct  < min_varportion_celltype,
-              "datacount_celltype"      = data_cnt_ct   < min_datacount_celltype,
-              "varportion_in_celltype"  = alt_proportion_in_ct < min_varportion_in_celltype,
               "odds_ratio_cutoff"       = OR < odds_ratio_cutoff,
               "zscore_cutoff"           = Z_score < zscore_cutoff,
               "p_value" = padj > max_p_value
@@ -844,7 +907,10 @@ find_somatic_variants <- function(h5_in=NULL,
       
       if(celltype_sort_value=="p"){
         full_results <- full_results %>%
-          arrange(padj)
+          arrange(padj,p)
+      }else if(celltype_sort_value=="z"){
+        full_results <- full_results %>%
+          arrange((desc(Z_score)))
       }
       
       if(!priority_only){
