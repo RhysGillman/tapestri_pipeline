@@ -47,7 +47,7 @@ cluster_variants <- function(
     pull(rownumber) %>%
     sort()
   
-  row_idx <- selection + 2
+  row_idx <- selection + 2 # add two for #FORMAT description and colnames
   #Read header
   
   fmt_line <- readLines(genotypes_file, n = 1L)
@@ -60,15 +60,15 @@ cluster_variants <- function(
   # Generate AF matrix of pass variants 
   
   #row_idx <- which(fread(genotypes_file, select="filter")$filter==".") + 2
-  pb   <- txtProgressBar(min = 0, max = length(row_idx), style = 3)
+  #pb   <- txtProgressBar(min = 0, max = length(row_idx), style = 3)
   variants  <- tryCatch({
     fread(cmd = sprintf("awk 'NR==%s' %s", paste(row_idx, collapse="||NR=="), genotypes_file), sep = "\t") %>%
     setNames(cols) %>%
     as.data.frame()}, error = function(e) {
       message("Warning: Genotype file read failed: ", conditionMessage(e), " - using fallback.")
       rbindlist(lapply(sort(unique(row_idx)), function(r) {
-        i <- which(row_idx==r)
-        setTxtProgressBar(pb, i)
+       # i <- which(row_idx==r)
+        #setTxtProgressBar(pb, i)
         fread(genotypes_file, skip = r - 1L, nrows = 1L, header = FALSE, sep = "\t")
       }), use.names = FALSE) %>%
         setNames(cols) %>%
@@ -142,7 +142,43 @@ cluster_variants <- function(
     stats::as.dist(D)
   }
   
-  D <- cosine_dist_na(af_matrix, min_overlap = 10L)
+  cosine_dist_na_fast <- function(A, min_overlap = 10L) {
+    # A: variants x cells AF matrix, with NAs for missing
+    # Returns: stats::as.dist of 1 - cosine, computed over pairwise-complete entries
+    A0 <- A
+    W  <- is.finite(A0)                 # mask of observed entries
+    A0[!W] <- 0                         # set NA to 0
+    
+    # Pairwise numerator: sum_k a_ka * a_kb over k where both obs
+    # With NA→0, crossprod already ignores pairs with missing on either side.
+    NUM <- crossprod(A0)                # (n_cells x n_cells)
+    
+    # Pairwise overlap counts: how many jointly observed variants per pair
+    OVER <- crossprod(W)                # integer matrix
+    
+    # For denominators we need norms over the *shared* support (not full norms):
+    # S_ab = sum_k a_ka^2 * I(b observed), asymmetric
+    A2  <- A0 * A0
+    S   <- crossprod(A2, W)             # S_ab
+    DEN <- sqrt(S * t(S))               # elementwise product then sqrt → shared L2 product
+    
+    # Cosine similarity with NA support + min_overlap
+    COS <- ifelse(DEN > 0, NUM / DEN, 0)
+    COS[OVER < min_overlap] <- 0        # or set distance=1 below
+    
+    # Distance
+    D <- 1 - COS
+    D[OVER < min_overlap] <- 1
+    
+    # Force symmetry / diag
+    diag(D) <- 0
+    D <- (D + t(D)) * 0.5
+    
+    stats::as.dist(D)
+  }
+  
+  
+  D <- cosine_dist_na_fast(af_matrix, min_overlap = 10L)
 
   set.seed(12345)
   umap_emb <- uwot::umap(
