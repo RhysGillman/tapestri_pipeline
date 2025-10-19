@@ -114,7 +114,8 @@ find_somatic_variants <- function(h5_in=NULL,
                                   overwrite_celltype_enrichment=TRUE,
                                   run_cell_type_enrichment=TRUE,
                                   genome_version="hg19",
-                                  threads=4
+                                  threads=4,
+                                  use_vep_file=NULL
                           ) {
 
   
@@ -334,8 +335,11 @@ find_somatic_variants <- function(h5_in=NULL,
   ########################################################################
   
   if(!skip_vep){
-    
-    if(file.exists(vep_file) & !overwrite_variant_summary){
+    if(!is.null(use_vep_file)){
+      if(file.exists(use_vep_file)){
+        vep_run <- .parse_vep_vcf(use_vep_file)
+      }
+    }else if(file.exists(vep_file) & !overwrite_variant_summary){
       message(paste0("Reading in existing VEP results from ", vep_file))
       vep_run <- .parse_vep_vcf(vep_file)
     }else{
@@ -1150,47 +1154,39 @@ find_somatic_variants <- function(h5_in=NULL,
   data_cnt_other <- data_cnt_total - data_cnt_ct
   alt_proportion_other <- ifelse(data_cnt_other > 0, alt_cnt_other / data_cnt_other, 0)
   
-  n <- length(alt_cnt_ct)
+  a <- alt_cnt_ct
+  b <- ref_cnt_ct
+  c <- alt_cnt_other
+  d <- ref_cnt_other
   
-  OR        <- rep(NA_real_, n)
-  logOR     <- rep(NA_real_, n)
-  SE        <- rep(NA_real_, n)
-  Z_score   <- rep(NA_real_, n)
-  p_wald    <- rep(NA_real_, n)
-  ci_low    <- rep(NA_real_, n)
-  ci_high   <- rep(NA_real_, n)
-  p_fisher  <- rep(NA_real_, n)
+  # Haldane-Anscombe continuity correction only if any cell is zero
+  needs_cc <- (a == 0L | b == 0L | c == 0L | d == 0L)
   
-  ok <- (alt_cnt_ct > 0 & ref_cnt_ct > 0 & alt_cnt_other > 0 & ref_cnt_other > 0)
+  a2 <- ifelse(needs_cc, a + 0.5, a)
+  b2 <- ifelse(needs_cc, b + 0.5, b)
+  c2 <- ifelse(needs_cc, c + 0.5, c)
+  d2 <- ifelse(needs_cc, d + 0.5, d)
   
-  # Odds ratio and Wald stats
-  OR[ok]    <- (alt_cnt_ct[ok] / ref_cnt_ct[ok]) / (alt_cnt_other[ok] / ref_cnt_other[ok])
-  logOR[ok] <- log(OR[ok])
-  SE[ok]    <- sqrt( 1/alt_cnt_ct[ok] + 1/ref_cnt_ct[ok] + 1/alt_cnt_other[ok] + 1/ref_cnt_other[ok] )
-  Z_score[ok] <- logOR[ok] / SE[ok]
-  p_wald[ok]  <- 2 * pnorm(-abs(Z_score[ok]))
+  # Wald (using corrected counts when needed)
+  OR    <- (a2 / b2) / (c2 / d2)
+  logOR <- log(OR)
+  SE    <- sqrt(1/a2 + 1/b2 + 1/c2 + 1/d2)
+  Z_score     <- logOR / SE
+  p_wald <- 2 * pnorm(-abs(Z_score))
+  ci_low  <- exp(logOR - 1.96 * SE)
+  ci_high <- exp(logOR + 1.96 * SE)
   
-  # 95% CI for the OR (Wald)
-  ci_low[ok]  <- exp(logOR[ok] - 1.96 * SE[ok])
-  ci_high[ok] <- exp(logOR[ok] + 1.96 * SE[ok])
+  # Fisher decision
+  has_data    <- (a + b + c + d) > 0L
+  need_fisher <- has_data & (pmin(a, b, c, d) < 5L)
   
-  # ---- Handle zeros/sparse cells ----
-  need_fisher <- (alt_cnt_ct + ref_cnt_ct + alt_cnt_other + ref_cnt_other) > 0 &
-    (alt_cnt_ct == 0 | ref_cnt_ct == 0 | alt_cnt_other == 0 | ref_cnt_other == 0 |
-       pmin(alt_cnt_ct, ref_cnt_ct, alt_cnt_other, ref_cnt_other) < 5)
-  
+  p_fisher <- rep(NA_real_, length(a))
   if (any(need_fisher)) {
-    fisher_idx <- which(need_fisher)
-    p_fisher[fisher_idx] <- vapply(
-      fisher_idx,
-      function(i) {
-        m <- matrix(c(alt_cnt_ct[i], ref_cnt_ct[i],
-                      alt_cnt_other[i], ref_cnt_other[i]),
-                    nrow = 2, byrow = TRUE)
-        fisher.test(m, alternative = "two.sided")$p.value
-      },
-      numeric(1)
-    )
+    idx <- which(need_fisher)
+    p_fisher[idx] <- vapply(idx, function(i) {
+      m <- matrix(c(a[i], b[i], c[i], d[i]), nrow = 2, byrow = TRUE)
+      fisher.test(m)$p.value
+    }, numeric(1))
   }
   
   p_final <- ifelse(!is.na(p_fisher), p_fisher, p_wald)
