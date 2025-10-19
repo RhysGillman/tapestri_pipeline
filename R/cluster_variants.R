@@ -7,7 +7,9 @@ cluster_variants <- function(
     plot_directory = NULL,
     resolution=0.2,
     n_features=100,
-    sample_ID=NULL
+    sample_ID=NULL,
+    n_neighbors = 30, 
+    min_dist = 0.3
     
 ){
   
@@ -102,20 +104,21 @@ cluster_variants <- function(
   # Seurat Object #
   #################
   
-  if(!is.null(seurat_obj)){
-    # Add assay to seurat object
-    assay_counts <- af_matrix
-    assay_counts[!is.finite(assay_counts)] <- 0
-    assay <- Seurat::CreateAssayObject(counts = assay_counts)
-    assay <- Seurat::SetAssayData(assay, layer = "data", new.data = assay_counts)
-    seurat_obj[["variants"]] <- assay
-    Seurat::DefaultAssay(seurat_obj) <- "variants"
-  }else{
-    assay_counts <- af_matrix
-    assay_counts[!is.finite(assay_counts)] <- 0
-    seurat_obj <- Seurat::CreateSeuratObject(counts = protein_count_matrix, assay = "variants")
-    Seurat::DefaultAssay(obj) <- "variants"
+  assay_counts <- af_matrix
+  assay_counts[!is.finite(assay_counts)] <- 0
+  assay_counts <- as(Matrix::Matrix(assay_counts, sparse = TRUE), "dgCMatrix")
+  
+  if (is.null(seurat_obj)) {
+    seurat_obj <- Seurat::CreateSeuratObject(counts = assay_counts, assay = "variants")
+  } else {
+    seurat_obj[["variants"]] <- Seurat::CreateAssayObject(counts = assay_counts)
   }
+  
+  # make both paths identical here
+  seurat_obj <- Seurat::SetAssayData(
+    seurat_obj, assay = "variants", layer = "data", new.data = assay_counts
+  )
+  Seurat::DefaultAssay(seurat_obj) <- "variants"
   
   ##############
   # Clustering #
@@ -213,7 +216,8 @@ cluster_variants <- function(
   print(p)
   
   if (!is.null(plot_directory)) {
-    ggplot2::ggsave(plot = p, filename = file.path(plot_directory, paste0(sample_ID, "_variant_umap.png")))
+    ggplot2::ggsave(plot = p, filename = file.path(plot_directory, paste0(sample_ID, "_variant_umap.png")),
+                    width = 25, height = 25, units = "cm", dpi = 300)
   }
   
   invisible(seurat_obj)

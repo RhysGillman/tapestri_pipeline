@@ -20,9 +20,9 @@
 .get_col_schema <- function(file, n_lines){
   head_file <- data.table::fread(file, nrows = n_lines)
   schema <- setNames(as.character(vapply(head_file, class, "")), names(head_file))
-  if(any(names(schema)%in%c("CHROM","chromosome","chr","CHR"))){
-    idx <- which(names(schema)%in%c("CHROM","chromosome","chr","CHR"))
-    schema[idx] <- "character"
-  }
+  
+  override <- c("MAX_AF"="double","chromosome"="character")
+  schema[names(override)] <- unname(override)
+  
   return(schema)
 }
