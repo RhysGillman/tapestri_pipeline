@@ -9,7 +9,11 @@ cluster_variants <- function(
     n_features=100,
     sample_ID=NULL,
     n_neighbors = 30, 
-    min_dist = 0.3
+    min_dist = 0.3,
+    min_data_portion=0.8,
+    rare_frequency_max=0.02,
+    dist_metric = "euclidean",
+    min_overlap = 10L
     
 ){
   
@@ -29,7 +33,7 @@ cluster_variants <- function(
   
   all_variants <- fread(summary_file) %>%
     mutate(rownumber=row_number()) %>%
-    filter(filter==".", data_proportion_total >= 0.80) %>%
+    filter(filter==".", data_proportion_total >= min_data_portion) %>%
     # get NGT variance (max = 0.5, deprioritises too low OR too high frequency)
     mutate(
       p_alt   = ifelse(data_cnt_total > 0, alt_cnt_total / data_cnt_total, NA_real_),
@@ -38,7 +42,7 @@ cluster_variants <- function(
     arrange(desc(var_ngt))
   rare_variants <- all_variants %>%
     filter(
-      p_alt < 0.02,
+      p_alt < rare_frequency_max,
       mean_GQ_total >= 30
     ) %>%
     arrange(desc(alt_cnt_total)) %>%
@@ -48,6 +52,8 @@ cluster_variants <- function(
   ) %>%
     pull(rownumber) %>%
     sort()
+  
+  message("Using ", length(selection), " features including ", nrow(rare_variants), " rare variants")
   
   row_idx <- selection + 2 # add two for #FORMAT description and colnames
   #Read header
@@ -181,12 +187,17 @@ cluster_variants <- function(
   }
   
   
-  D <- cosine_dist_na_fast(af_matrix, min_overlap = 10L)
+  D <- cosine_dist_na_fast(af_matrix, min_overlap = min_overlap)
+  #D <- as.matrix(D)
+  #diag(D) <- 0
+  #stopifnot(nrow(D) == ncol(D))
 
+  #X <- cmdscale(stats::as.dist(D), k = min(10L, ncol(D) - 1L))
+  
   set.seed(12345)
   umap_emb <- uwot::umap(
     D,
-    n_neighbors = 30, min_dist = 0.3, metric = "euclidean",
+    n_neighbors = n_neighbors, min_dist = min_dist, metric = dist_metric,
     n_components = 2, verbose = FALSE
   )
   rownames(umap_emb) <- colnames(af_matrix)
