@@ -50,6 +50,7 @@
 plot_variants <- function(
     seurat_obj=NULL,
     cell_annotations=NULL,
+    focus_celltype=NULL,
     file_prefix=NULL,
     input_files=NULL,
     search=NULL,
@@ -76,7 +77,9 @@ plot_variants <- function(
     run_upset=T,
     run_heatmap=T,
     run_umap=T,
-    run_sankey=T
+    run_sankey=T,
+    heatmap_anno="padj",
+    include_UMAP_ref=T
 ){
   .is_mutated <- function(s) {
     components <- unlist(str_split(s, ";"))
@@ -148,7 +151,13 @@ plot_variants <- function(
   # If not searching, just take top n results #
   
   if(is.null(search)){
-    variant_rows <- foreach(file=file.path(result_dir,cell_type_files), .combine = "bind_rows") %do%{
+    
+    if(!is.null(focus_celltype)){
+      search_files <- paste0(file_prefix,"_",focus_celltype,".tsv")
+    }else{
+      search_files <- cell_type_files
+    }
+    variant_rows <- foreach(file=file.path(result_dir,search_files), .combine = "bind_rows") %do%{
       c <- str_extract(file, pattern = paste0(file_prefix,"_(.*).*.tsv"), group = 1)
       v <- fread(file, col.names  = names(cell_type_cols), colClasses = unname(cell_type_cols)) %>%
         mutate(cell_type=c)
@@ -187,7 +196,14 @@ plot_variants <- function(
     
   }else{
     
-    variant_rows <- foreach(file=file.path(result_dir,cell_type_files), .combine = "bind_rows") %do%{
+    if(!is.null(focus_celltype)){
+      search_files <- paste0(file_prefix,"_",focus_celltype,".tsv")
+    }else{
+      search_files <- cell_type_files
+    }
+    
+    
+    variant_rows <- foreach(file=file.path(result_dir,search_files), .combine = "bind_rows") %do%{
       c <- str_extract(file, pattern = paste0(file_prefix,"_(.*).*.tsv"), group = 1)
       v <- fread(file, col.names  = names(cell_type_cols), colClasses = unname(cell_type_cols)) %>%
         mutate(cell_type=c) %>%
@@ -272,7 +288,9 @@ plot_variants <- function(
     suppressWarnings(rm(sig_anno))
     for(file in cell_type_files){
       ct <- names(cell_type_files[which(cell_type_files==file)])
-      anno <- fread(file.path(result_dir,file), select = c("plot_ID","padj")) %>%
+      anno <- fread(file.path(result_dir,file), select = c("plot_ID","padj","OR")) %>%
+        mutate(padj=ifelse(OR<1,NA,padj)) %>%
+        dplyr::select(plot_ID,padj) %>%
         dplyr::filter(plot_ID %in% variants) %>%
         mutate(plot_ID=URLdecode(plot_ID))
       
@@ -300,7 +318,7 @@ plot_variants <- function(
     
     bar_data <- variant_counts %>%
       left_join(sig_anno %>% dplyr::select(plot_ID,cell_type,sig), by = c("plot_ID","cell_type")) %>%
-      mutate(plot_ID = factor(plot_ID, levels = unname(variants)))
+      mutate(plot_ID = factor(plot_ID, levels = URLdecode(unname(variants))))
     
     p <- ggplot(bar_data, aes(x=plot_ID, fill=cell_type, y=alt_frequency, label=sig)) +
       geom_bar(stat = "identity", position = "stack") +
@@ -400,26 +418,26 @@ plot_variants <- function(
     HM_cell_order <- as.data.frame(cell_annotations)
     colnames(HM_cell_order) <- "cell_type"
     
-    suppressWarnings(rm(padj_df))
+    suppressWarnings(rm(anno_df))
     for(file in cell_type_files){
       ct <- names(cell_type_files[which(cell_type_files==file)])
-      anno <- fread(file.path(result_dir,file), select = c("plot_ID","padj")) %>%
+      anno <- fread(file.path(result_dir,file), select = c("plot_ID",heatmap_anno)) %>%
         dplyr::filter(plot_ID %in% variants) %>%
         mutate(plot_ID=URLdecode(plot_ID))
       
-      padjs_out <- rep(1, length(variants))
-      names(padjs_out) <- URLdecode(variants)
+      anno_vals_out <- rep(1, length(variants))
+      names(anno_vals_out) <- URLdecode(variants)
       
       if(nrow(anno)>0){
-        padjs <- deframe(anno)
-        padjs_out[names(padjs)] <- padjs
+        anno_vals <- deframe(anno)
+        anno_vals_out[names(anno_vals)] <- anno_vals
       }
-      anno_out <- data.frame(padjs_out)
+      anno_out <- data.frame(anno_vals_out)
       colnames(anno_out) <- ct
-      if(exists("padj_df")){
-        padj_df <- cbind(padj_df,anno_out)
+      if(exists("anno_df")){
+        anno_df <- cbind(anno_df,anno_out)
       }else{
-        padj_df <- anno_out
+        anno_df <- anno_out
       }
     }
     
@@ -460,6 +478,10 @@ plot_variants <- function(
       c(0, 1, -log10(0.05), 3),
       c("#E03512", "#EDE953", "white", "#66a61e")
     )
+    OR_colfun <- colorRamp2(
+      c(0, 1, 10),
+      c("#E03512", "white", "#66a61e")
+    )
     
     # consistent cell-type colours
     cts <- unique(HM_cell_order$cell_type)
@@ -478,19 +500,22 @@ plot_variants <- function(
     )
     
     # reorder padj_df columns to match top-to-bottom order of cell types
-    padj_df <- padj_df[, levels(factor(HM_cell_order$cell_type, levels = unique(HM_cell_order$cell_type))), drop = FALSE]
+    anno_df <- anno_df[, levels(factor(HM_cell_order$cell_type, levels = unique(HM_cell_order$cell_type))), drop = FALSE]
     
     # build per-cell-type strips (no legends)
-    annos_list <- setNames(lapply(colnames(padj_df), function(ct) {
-      vals <- pmax(padj_df[[ct]], 1e-6)         # avoid log10(0)
-      anno_simple(-log10(vals), col = p_colfun)
-    }), colnames(padj_df))
+    annos_list <- setNames(lapply(colnames(anno_df), function(ct) {
+      vals <- pmax(anno_df[[ct]], 1e-6)         # avoid log10(0)
+      if(heatmap_anno=="padj"){
+        anno_simple(x=-log10(vals), col = p_colfun)
+      }else{
+        anno_simple(x=vals, col = OR_colfun)
+      }
+    }), colnames(anno_df))
     
-    # combine them; move their label side to *right* to avoid overlap
     top_anno <- do.call(HeatmapAnnotation, c(
       annos_list,
       list(
-        annotation_name_side = "left",   # <-- move padj strip titles right
+        annotation_name_side = "left",   
         annotation_name_rot  = 0,         # horizontal
         show_legend = FALSE
       )
@@ -513,10 +538,10 @@ plot_variants <- function(
     
     # single shared padj legend
     p_legend <- Legend(
-      title = "Adjusted p-value",
-      col_fun = p_colfun,
-      at = c(0, 1, -log10(0.05), 3, 5),
-      labels = c("1", "0.1", "0.05", "0.001", "1e-5"),
+      title = if(heatmap_anno=="padj") "Adjusted p-value" else "Odds Ratio",
+      col_fun = if(heatmap_anno=="padj") p_colfun else OR_colfun,
+      at = if(heatmap_anno=="padj") c(0, 1, -log10(0.05), 3) else c(0, 1, 10),
+      labels = if(heatmap_anno=="padj") c("1", "0.1", "0.05", "0.001") else  c("0", "1", "10"),
       direction = "horizontal"
     )
     
@@ -679,13 +704,15 @@ plot_variants <- function(
   
       plot_height = ceiling((length(variants)/3))*10
       
-      NGT_plots <- .assemble_feature_grid(variant_plot_list=umap_plots, feature = "NGT", reference_umap=annotated_umap, 
+      NGT_plots <- .assemble_feature_grid(variant_plot_list=umap_plots, feature = "NGT", 
+                                          reference_umap=if(include_UMAP_ref) annotated_umap else NULL, 
                                           ncol = if(length(variants) < 3) length(variants) else 3)
       
       ggsave(plot = NGT_plots, file.path(plot_directory,paste0(plot_prefix,"_umap_variants_NGT.png")),  width = 40, height = plot_height, units = "cm")
       message(paste0("Saved genotype UMAP plot to "), file.path(plot_directory,paste0(plot_prefix,"_umap_variants_NGT.png")))
       
-      AF_plots <- .assemble_feature_grid(variant_plot_list=umap_plots, feature = "AF", reference_umap=annotated_umap, 
+      AF_plots <- .assemble_feature_grid(variant_plot_list=umap_plots, feature = "AF", 
+                                         reference_umap=if(include_UMAP_ref) annotated_umap else NULL, 
                                          ncol = if(length(variants) < 3) length(variants) else 3)
       ggsave(plot = AF_plots, file.path(plot_directory,paste0(plot_prefix,"_umap_variants_AF.png")),  width = 40, height = plot_height, units = "cm")
       message(paste0("Saved allele-frequency UMAP plot to "), file.path(plot_directory,paste0(plot_prefix,"_umap_variants_AF.png")))
@@ -734,7 +761,7 @@ plot_variants <- function(
 
 .assemble_feature_grid <- function(variant_plot_list,
                                   feature = c("NGT","AF","DP","GQ"),
-                                  reference_umap,
+                                  reference_umap=NULL,
                                   ncol = 4,
                                   title = NULL,
                                   collect_legend = TRUE,
@@ -770,13 +797,24 @@ plot_variants <- function(
   
   
   # assemble patchwork grid
-  wrap_plots(
-    plots,
-    ncol = ncol,
-    guides = if (isTRUE(collect_legend)) "collect" else "keep"
-  ) | (reference_umap + Seurat::NoLegend()) +
-    plot_annotation(title = feature) &
-    theme(plot.title = element_text(hjust = 0.5))
+  if(!is.null(reference_umap)){
+    wrap_plots(
+      plots,
+      ncol = ncol,
+      guides = if (isTRUE(collect_legend)) "collect" else "keep"
+    ) | (reference_umap + Seurat::NoLegend()) +
+      plot_annotation(title = feature) &
+      theme(plot.title = element_text(hjust = 0.5))
+  }else{
+    wrap_plots(
+      plots,
+      ncol = ncol,
+      guides = if (isTRUE(collect_legend)) "collect" else "keep"
+    ) +
+      plot_annotation(title = feature) &
+      theme(plot.title = element_text(hjust = 0.5))
+  }
+  
 }
 
 
