@@ -80,7 +80,7 @@ find_somatic_variants <- function(h5_in=NULL,
                                   prep_vcf=F,
                                   prep_vcf_dir=NULL,
                                   cell_type="all",
-                                  cell_annotations,
+                                  cell_annotations=NULL,
                                   out_dir,
                                   file_prefix,
                                   skip_vep = F,
@@ -118,6 +118,10 @@ find_somatic_variants <- function(h5_in=NULL,
                                   use_vep_file=NULL
                           ) {
 
+  if(is.null(cell_annotations) & run_cell_type_enrichment){
+    stop("ERROR: Cell type enrichment requires cell annotations!")
+  }
+  
   
   #########################################################
   # ------------------- Sanity Checks ------------------- #
@@ -132,15 +136,17 @@ find_somatic_variants <- function(h5_in=NULL,
   # ------------------- Check Cell Types ------------------- #
   ############################################################
   
-  all_cell_types <- sort(unique(cell_annotations))
-  
-  if (cell_type != "all") {
-    analysis_cell_types <- intersect(all_cell_types, cell_type)
-  }else{
-    analysis_cell_types <- all_cell_types
+  if(!is.null(cell_annotations)){
+    all_cell_types <- sort(unique(cell_annotations))
+    
+    if (cell_type != "all") {
+      analysis_cell_types <- intersect(all_cell_types, cell_type)
+    }else{
+      analysis_cell_types <- all_cell_types
+    }
+    
+    if (length(analysis_cell_types)==0) stop("Selected cell type doesn't match available data")
   }
-  
-  if (length(analysis_cell_types)==0) stop("Selected cell type doesn't match available data")
   
   #######################################################
   # ------------------- Check Paths ------------------- #
@@ -168,26 +174,27 @@ find_somatic_variants <- function(h5_in=NULL,
     }
   }
   
-  for (ct in analysis_cell_types) {
-    # stores cell type-specific stats for all variants
-    ct_file <- file.path(out_dir,paste0(file_prefix,"_",ct,".tsv"))
-    # stores cell type-specific stats for passing variants
-    ct_pass_file <- file.path(out_dir,paste0(file_prefix,"_",ct,"_pass_only.tsv"))
-    # stores cell type-specific stats for passing priority variants
-    ct_pass_priority_file <- file.path(out_dir,paste0(file_prefix,"_",ct,"_pass_only_priority.tsv"))
-    
-    for(path in c(ct_file,ct_pass_file,ct_pass_priority_file)){
-      if(file.exists(path)){
-        if(overwrite_celltype_enrichment){
-          message(paste0("Removing ", path, "..."))
-          file.remove(path)
-        }else{
-          stop(paste0(path," already exists!"))
+  if(!is.null(cell_annotations)){
+    for (ct in analysis_cell_types) {
+      # stores cell type-specific stats for all variants
+      ct_file <- file.path(out_dir,paste0(file_prefix,"_",ct,".tsv"))
+      # stores cell type-specific stats for passing variants
+      ct_pass_file <- file.path(out_dir,paste0(file_prefix,"_",ct,"_pass_only.tsv"))
+      # stores cell type-specific stats for passing priority variants
+      ct_pass_priority_file <- file.path(out_dir,paste0(file_prefix,"_",ct,"_pass_only_priority.tsv"))
+      
+      for(path in c(ct_file,ct_pass_file,ct_pass_priority_file)){
+        if(file.exists(path)){
+          if(overwrite_celltype_enrichment){
+            message(paste0("Removing ", path, "..."))
+            file.remove(path)
+          }else{
+            stop(paste0(path," already exists!"))
+          }
         }
       }
     }
   }
-  
   vep_file <- file.path(out_dir, paste0(file_prefix, "_vep_annotated.vcf"))
   
   #############################################################
@@ -207,42 +214,43 @@ find_somatic_variants <- function(h5_in=NULL,
     barcodes <- as.vector(rhdf5::h5read(h5_in, "/assays/dna_variants/ra/barcode"))
   }
     
-  if (length(barcodes) != length(cell_annotations)) stop("cell annotations are not the same length as vcf samples")
-  
-  # attempt to trim barcodes if needed
-  if (!identical(sort(names(cell_annotations)),sort(barcodes))) {
-    message("variant barcodes don't match cell annotations")
-    message("attemtping to find match in substring...")
-    barcode1 <- barcodes[1]
-    cell1 <- names(cell_annotations)[1]
-    match <- F
-    for(i in 1:nchar(barcode1)){
-      start_sub <- substr(barcode1,1,i)
-      end_sub <- substr(barcode1,nchar(barcode1)-i,nchar(barcode1))
-      if(start_sub==cell1){
-        match <- T
-        barcode_suffix <- substr(barcode1, i+1, nchar(barcode1))
-        barcodes <- gsub(barcode_suffix,"",barcodes)
-        if (identical(sort(names(cell_annotations)),sort(barcodes))){
-          message(paste0("substring match found, trimming ", barcode_suffix," suffix from barcodes"))
+  if(!is.null(cell_annotations)){
+    if (length(barcodes) != length(cell_annotations)) stop("cell annotations are not the same length as vcf samples")
+    
+    # attempt to trim barcodes if needed
+    if (!identical(sort(names(cell_annotations)),sort(barcodes))) {
+      message("variant barcodes don't match cell annotations")
+      message("attemtping to find match in substring...")
+      barcode1 <- barcodes[1]
+      cell1 <- names(cell_annotations)[1]
+      match <- F
+      for(i in 1:nchar(barcode1)){
+        start_sub <- substr(barcode1,1,i)
+        end_sub <- substr(barcode1,nchar(barcode1)-i,nchar(barcode1))
+        if(start_sub==cell1){
+          match <- T
+          barcode_suffix <- substr(barcode1, i+1, nchar(barcode1))
+          barcodes <- gsub(barcode_suffix,"",barcodes)
+          if (identical(sort(names(cell_annotations)),sort(barcodes))){
+            message(paste0("substring match found, trimming ", barcode_suffix," suffix from barcodes"))
+          }
+        }else if (end_sub==cell1){
+          match <- T
+          barcode_prefix <- substr(barcode1,i, nchar(barcode1)-i-1)
+          barcodes <- gsub(barcode_prefix,"",barcodes)
+          if (identical(sort(names(cell_annotations)),sort(barcodes))){
+            message(paste0("substring match found, trimming ", barcode_prefix," prefix from barcodes"))
+          }
         }
-      }else if (end_sub==cell1){
-        match <- T
-        barcode_prefix <- substr(barcode1,i, nchar(barcode1)-i-1)
-        barcodes <- gsub(barcode_prefix,"",barcodes)
-        if (identical(sort(names(cell_annotations)),sort(barcodes))){
-          message(paste0("substring match found, trimming ", barcode_prefix," prefix from barcodes"))
+        if(match){
+          break
         }
       }
-      if(match){
-        break
+      if(!match){
+        stop("no substring match found")
       }
-    }
-    if(!match){
-      stop("no substring match found")
     }
   }
-  
   ##############################################################
   # ------------------- Normalise Variants ------------------- #
   ##############################################################
@@ -563,30 +571,32 @@ find_somatic_variants <- function(h5_in=NULL,
       
       
       # write counts per cell type
+      if(!is.null(cell_annotations)){
+        counts_per_ct <- NGTb %>%
+          as.data.frame() %>%
+          mutate(variant_order=row_number()) %>%
+          relocate(variant_order) %>%
+          pivot_longer(-variant_order, names_to = "barcode", values_to = "NGT") %>%
+          left_join(cell_annotations %>% enframe() %>% as.data.frame() %>% setNames(c("barcode","cell_type")), by = "barcode") %>%
+          group_by(variant_order,cell_type) %>%
+          summarise(alt_count=sum(NGT%in%c(1,2), na.rm = T),
+                    data_count=sum(NGT%in%c(0,1,2), na.rm = T),
+                    .groups = "drop") %>%
+          pivot_wider(
+            id_cols = variant_order,
+            names_from = cell_type,
+            values_from = c(alt_count, data_count),
+            names_glue = "{cell_type}_{.value}",
+            values_fill = list(alt_count = 0, data_count = 0)
+          ) %>%
+          arrange(variant_order) %>%
+          dplyr::select(-variant_order)
+        
+        counts_per_ct <- bind_cols(block_variants,counts_per_ct)
+        
+        write_tsv(counts_per_ct, counts_per_cell_type_file, append = TRUE, col_names = first_block)
+      }
       
-      counts_per_ct <- NGTb %>%
-        as.data.frame() %>%
-        mutate(variant_order=row_number()) %>%
-        relocate(variant_order) %>%
-        pivot_longer(-variant_order, names_to = "barcode", values_to = "NGT") %>%
-        left_join(cell_annotations %>% enframe() %>% as.data.frame() %>% setNames(c("barcode","cell_type")), by = "barcode") %>%
-        group_by(variant_order,cell_type) %>%
-        summarise(alt_count=sum(NGT%in%c(1,2), na.rm = T),
-                  data_count=sum(NGT%in%c(0,1,2), na.rm = T),
-                  .groups = "drop") %>%
-        pivot_wider(
-          id_cols = variant_order,
-          names_from = cell_type,
-          values_from = c(alt_count, data_count),
-          names_glue = "{cell_type}_{.value}",
-          values_fill = list(alt_count = 0, data_count = 0)
-        ) %>%
-        arrange(variant_order) %>%
-        dplyr::select(-variant_order)
-      
-      counts_per_ct <- bind_cols(block_variants,counts_per_ct)
-      
-      write_tsv(counts_per_ct, counts_per_cell_type_file, append = TRUE, col_names = first_block)
       
       # get per cell info
       
@@ -754,31 +764,31 @@ find_somatic_variants <- function(h5_in=NULL,
       }
       
       # write counts per cell type
-      
-      counts_per_ct <- NGTb %>%
-        as.data.frame() %>%
-        mutate(variant_order=row_number()) %>%
-        relocate(variant_order) %>%
-        pivot_longer(-variant_order, names_to = "barcode", values_to = "NGT") %>%
-        left_join(cell_annotations %>% enframe() %>% setNames(c("barcode","cell_type")), by = "barcode") %>%
-        group_by(variant_order,cell_type) %>%
-        summarise(alt_count=sum(NGT%in%c(1,2), na.rm = T),
-                  data_count=sum(NGT%in%c(0,1,2), na.rm = T),
-                  .groups = "drop") %>%
-        pivot_wider(
-          id_cols = variant_order,
-          names_from = cell_type,
-          values_from = c(alt_count, data_count),
-          names_glue = "{cell_type}_{.value}",
-          values_fill = list(alt_count = 0, data_count = 0)
-        ) %>%
-        arrange(variant_order) %>%
-        dplyr::select(-variant_order)
-      
-      counts_per_ct <- bind_cols(block_variants,counts_per_ct)
-      
-      write_tsv(counts_per_ct, counts_per_cell_type_file, append = TRUE, col_names = first_block)
-      
+      if(!is.null(cell_annotations)){
+        counts_per_ct <- NGTb %>%
+          as.data.frame() %>%
+          mutate(variant_order=row_number()) %>%
+          relocate(variant_order) %>%
+          pivot_longer(-variant_order, names_to = "barcode", values_to = "NGT") %>%
+          left_join(cell_annotations %>% enframe() %>% setNames(c("barcode","cell_type")), by = "barcode") %>%
+          group_by(variant_order,cell_type) %>%
+          summarise(alt_count=sum(NGT%in%c(1,2), na.rm = T),
+                    data_count=sum(NGT%in%c(0,1,2), na.rm = T),
+                    .groups = "drop") %>%
+          pivot_wider(
+            id_cols = variant_order,
+            names_from = cell_type,
+            values_from = c(alt_count, data_count),
+            names_glue = "{cell_type}_{.value}",
+            values_fill = list(alt_count = 0, data_count = 0)
+          ) %>%
+          arrange(variant_order) %>%
+          dplyr::select(-variant_order)
+        
+        counts_per_ct <- bind_cols(block_variants,counts_per_ct)
+        
+        write_tsv(counts_per_ct, counts_per_cell_type_file, append = TRUE, col_names = first_block)
+      }
       # get per cell info
       
       block_per_cell_info <- array(
