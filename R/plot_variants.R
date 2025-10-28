@@ -42,7 +42,17 @@
 #'   results files is used. Use `"p"` (ascending) or `"OR"`/`"Z_score"` (descending).
 #' @param font_size_multiplyer Global multiplier for text sizes in UMAP panels;
 #'   useful when plotting many variants in grids.
-#'
+#' @param umap_reduction Which reduction to use when generating UMAP plots. Usually either
+#'   "umap" for ADT-base clusters (default) or "umap.variants" for variant-based clusters
+#' @param upset_n How many intersections should be displayed in Upset plot
+#' @param sankey_min_count Controls the minimum set size to be displayed on Sankey plot
+#' @param run_barplot Generate barplot (TRUE / FALSE)
+#' @param run_upset Generate Upset plot (TRUE / FALSE)
+#' @param run_heatmap Generate Heatmap (TRUE / FALSE)
+#' @param run_umap Generate UMAP plots (TRUE / FALSE)
+#' @param run_sankey Generate Sankey plots
+#' @param heatmap_anno Which feature should be used to annotate the heatmap. Either "padj" or "OR"
+#' @param include_UMAP_ref Include reference UMAP image in generate AF and NGT umaps? (TRUE / FALSE)
 #' @return Seurat object
 #' @export
 

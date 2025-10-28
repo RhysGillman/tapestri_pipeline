@@ -72,6 +72,7 @@
 #'   (e.g., `"hg19"`, `"GRCh38"`). Must match contigs in the input VCF.
 #' @param threads Number of threads to use where parallelism is available. (Most
 #'   operations here are chunked; heavy parallelism occurs upstream/downstream.)
+#' @param use_vep_file Path to existing VEP annotation file to use
 #' @return 
 #' @export
 
@@ -121,7 +122,6 @@ find_somatic_variants <- function(h5_in=NULL,
   if(is.null(cell_annotations) & run_cell_type_enrichment){
     stop("ERROR: Cell type enrichment requires cell annotations!")
   }
-  
   
   #########################################################
   # ------------------- Sanity Checks ------------------- #

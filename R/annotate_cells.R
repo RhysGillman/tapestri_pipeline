@@ -2,7 +2,7 @@
 #'
 #' This function automatically annotates individual cells in a seurat object
 #'
-#' @param seurat_obj Input seurate object created using prepare_annotation_data()
+#' @param seurat_obj Input seurat object created using prepare_annotation_data()
 #' @param markers Either "CellMarker2.0" (default) or named list of markers for cell types
 #' @param plot_directory Output directory to save plots
 #' @param CellMarker_path Path to CellMarker2.0 
@@ -40,8 +40,7 @@ annotate_cells <- function(
     cell_markers <- markers
     # only keep markers present in seurat object
     cell_markers <- lapply(cell_markers, function(v) v[v %in% Features(seurat_obj)])
-  }
-  else if(markers=="CellMarker2.0"){
+  }else if(markers=="CellMarker2.0"){
     # Read in and filter CellMarker data
     if(tissue=="normal peripheral blood"){
       cell_markers <- read_xlsx(CellMarker_path) %>%
@@ -90,15 +89,19 @@ annotate_cells <- function(
     row.names    = NULL
   )
   
-  # unknown assignments: keep them with NA prob
-  df_unknown <- data.frame(
-    cell_barcode = names(scina_cell_annotations)[!known],
-    cell_type    = scina_cell_annotations[!known],
-    probability  = NA,
-    row.names    = NULL
-  )
+  if(any(!known)){
+    # unknown assignments: keep them with NA prob
+    df_unknown <- data.frame(
+      cell_barcode = names(scina_cell_annotations)[!known],
+      cell_type    = scina_cell_annotations[!known],
+      probability  = NA,
+      row.names    = NULL
+    )
+    df_known <- rbind(df_known, df_unknown)
+  }
   
-  final_annotations <- rbind(df_known, df_unknown) %>%
+  
+  final_annotations <- df_known %>%
     # filter annotations
     mutate(cell_type=ifelse(probability<scina_probability_threshold, "unknown",cell_type)) %>%
     dplyr::select(cell_barcode,cell_type) %>%
@@ -107,6 +110,7 @@ annotate_cells <- function(
   #################################
   # Visualise Annotations on UMAP #
   #################################
+  
   message(paste0("Generating ",file.path(plot_directory,paste0(sample_ID,"_SCINA_cell_annotations_UMAP.png"))))
   # add SCINA annotations to seurat object
   common <- intersect(colnames(seurat_obj), names(final_annotations))

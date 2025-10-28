@@ -2,7 +2,7 @@
 #'
 #' This function adds manual celltype annotations to a seurat object
 #'
-#' @param seurat_obj Input seurate object
+#' @param seurat_obj Input seurat object
 #' @param resolution Resolution to be used for clustering
 #' @param annotations Named vector of cell types for each cluster
 #' @param plot_directory Location to save final annotations UMAP
@@ -10,7 +10,11 @@
 #' @export
 
 
-annotate_clusters <- function(seurat_obj=NULL, resolution=NULL, annotations=NULL, plot_directory=NULL){
+annotate_clusters <- function(seurat_obj=NULL, 
+                              resolution=NULL, 
+                              annotations=NULL, 
+                              plot_directory=NULL){
+  
   sample_ID=seurat_obj@meta.data$sample_ID[1]
   cluster_col <- paste0("ADT_snn_res.", resolution)
   if (!cluster_col %in% colnames(seurat_obj@meta.data)) {
